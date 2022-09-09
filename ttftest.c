@@ -21,3 +21,4 @@ int main(int argc, const char *argv[])
     free(fontBuffer);
     return 0;
 }
+
