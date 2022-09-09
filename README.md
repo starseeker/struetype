@@ -29,4 +29,6 @@ CVE-2020-6618
 CVE-2020-6617
 
 We'll start by setting up the test cases in the reports and making sure we can
-reproduce the failures.
+reproduce the failures.  The code and files are from https://github.com/Vincebye
+Github issues associated with these CVEs.
+
