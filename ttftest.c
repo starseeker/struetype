@@ -15,7 +15,7 @@ int main(int argc, const char *argv[])
     fclose(fontFile);
 
     stbtt_fontinfo info;
-    if (!stbtt_InitFont(&info, fontBuffer, 0))
+    if (!stbtt_InitFont(&info, fontBuffer, size, 0))
         printf("failed\n");
 
     free(fontBuffer);
