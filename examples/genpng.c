@@ -5,9 +5,16 @@
  * 1. Load a TrueType font using struetype.h
  * 2. Render all printable ASCII characters (32-126) using stt_GetCodepointBitmap
  * 3. Arrange glyphs in a grid layout with optional grid lines
- * 4. Center each glyph in its grid cell
- * 5. Convert grayscale bitmap to RGB format
- * 6. Save the result as a PNG file using svpng.h
+ * 4. Center each glyph visually in its grid cell using font metrics
+ * 5. Render characters darker on light background using simple subtraction
+ * 6. Convert grayscale bitmap to RGB format
+ * 7. Save the result as a PNG file using svpng.h
+ *
+ * Key rendering features:
+ * - Uses font ascent/descent metrics to calculate proper baseline positioning
+ * - Centers glyphs horizontally and vertically for visual consistency
+ * - Ignores xOffset/yOffset for cleaner visual centering
+ * - Simple subtraction blending for crisp, dark text on light background
  *
  * Usage: genpng [font_file] [output_file]
  * Defaults: genpng profont/ProFont.ttf fontgrid.png
@@ -69,6 +76,15 @@ int main(int argc, const char *argv[])
     /* Calculate font scaling - converts font units to pixels */
     float scale = stt_ScaleForPixelHeight(&info, fontSize);
 
+    /* Get font metrics for baseline calculation */
+    int ascent, descent, lineGap;
+    stt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
+    
+    /* Calculate baseline position to center font vertically in cell
+     * Formula: cellHeight/2 + (ascent-descent)/2*scale - ascent*scale
+     * This positions the baseline so the font appears visually centered */
+    float baseline = (cellHeight / 2.0f) + ((ascent - descent) / 2.0f * scale) - (ascent * scale);
+
     /* Create grayscale image buffer (8-bit per pixel) */
     unsigned char *grayBuffer = calloc(imageWidth * imageHeight, sizeof(unsigned char));
     if (!grayBuffer) {
@@ -93,11 +109,13 @@ int main(int argc, const char *argv[])
                                                              &xOffset, &yOffset);
 
         if (glyphBitmap) {
-            /* Calculate position to center glyph in cell */
+            /* Calculate glyph position using baseline-centered approach
+             * - Center horizontally in cell (ignore xOffset for visual centering)
+             * - Position vertically using calculated baseline (ignore yOffset) */
             int cellX = col * cellWidth;
             int cellY = row * cellHeight;
-            int glyphX = cellX + (cellWidth - glyphWidth) / 2 + xOffset;
-            int glyphY = cellY + (cellHeight - glyphHeight) / 2 + yOffset;
+            int glyphX = cellX + (cellWidth - glyphWidth) / 2;
+            int glyphY = cellY + (int)baseline;
 
             /* Copy glyph bitmap to main image buffer */
             for (int gy = 0; gy < glyphHeight; gy++) {
@@ -109,10 +127,13 @@ int main(int argc, const char *argv[])
                     if (imageX >= 0 && imageX < imageWidth &&
                         imageY >= 0 && imageY < imageHeight) {
                         unsigned char glyphPixel = glyphBitmap[gy * glyphWidth + gx];
-                        /* Blend glyph with background (antialiased rendering) */
+                        
+                        /* Render characters darker by subtracting glyph pixel from background
+                         * This creates darker text on light background, clamped at 0 */
                         int bgPixel = grayBuffer[imageY * imageWidth + imageX];
-                        int blended = bgPixel - (glyphPixel * (255 - bgPixel)) / 255;
-                        grayBuffer[imageY * imageWidth + imageX] = blended;
+                        int darkened = bgPixel - glyphPixel;
+                        if (darkened < 0) darkened = 0;
+                        grayBuffer[imageY * imageWidth + imageX] = darkened;
                     }
                 }
             }
