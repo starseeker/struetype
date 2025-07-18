@@ -19,16 +19,17 @@
  * - Ignores xOffset/yOffset for cleaner visual centering
  * - Simple subtraction blending for crisp, dark text on light background
  * - Scans entire Unicode range using stt_FindGlyphIndex to find available glyphs
- * - Target maximum image size of 2450x3200 pixels (portrait, 300dpi print ready)
- * - All pages have identical dimensions for consistent output
+ * - Target maximum image size of 1500x2000 pixels (portrait, 300dpi print ready)
+ * - Adaptive sizing: single-page output sized to fit content, multi-page uses uniform dimensions
  * - Footer displays font name and Unicode range using the font being visualized
  *
- * Enhanced features:
+ * Enhanced sizing logic:
+ * - Single-page output: Image sized just large enough to fit grid and footer (may be smaller than max)
+ * - Multi-page output: All pages use uniform 1500x2000 pixel dimensions (including last page)
  * - Smart output naming: single image without suffix, multiple with zero-padded numbers
  * - Footer strip below grid showing font name and Unicode range
- * - Footer rendered using the font itself if all characters are available
- * - Consistent page dimensions across all output files
- * - Print-ready 2450x3200 pixel output size (8.17" x 10.67" at 300dpi)
+ * - Footer rendered using the font itself if all characters are available, otherwise skipped
+ * - Print-ready 1500x2000 pixel output size for multi-page (5" x 6.67" at 300dpi)
  *
  * Usage: genpng [font_file] [output_prefix]
  * Defaults: genpng profont/ProFont.ttf fontgrid
@@ -120,7 +121,7 @@ void render_footer(stt_fontinfo *info, unsigned char *buffer, int imageWidth, in
                    int footerHeight, const char *fontName, int startCodepoint, int endCodepoint) {
     /* Create footer text */
     char footerText[256];
-    snprintf(footerText, sizeof(footerText), "Font: %s   U+%04X–U+%04X", 
+    snprintf(footerText, sizeof(footerText), "Font: %s   U+%04X-U+%04X", 
              fontName, startCodepoint, endCodepoint);
     
     /* Check if all characters are available */
@@ -206,8 +207,8 @@ int main(int argc, const char *argv[])
     const int cellHeight = 48;   /* Height of each cell in pixels */
     const int fontSize = 24;     /* Font size in pixels */
     const int drawGridLines = 1; /* Draw faint grid lines */
-    const int maxImageWidth = 2450;  /* Maximum image width (portrait orientation) */
-    const int maxImageHeight = 3200; /* Maximum image height */
+    const int maxImageWidth = 1500;  /* Maximum image width (portrait orientation) */
+    const int maxImageHeight = 2000; /* Maximum image height */
     const int footerHeight = 80;     /* Height reserved for footer */
     const int footerFontSize = 14;   /* Font size for footer text */
     
@@ -265,9 +266,26 @@ int main(int argc, const char *argv[])
     char fontName[256];
     get_font_name(fontPath, fontName, sizeof(fontName));
 
-    /* Calculate consistent image dimensions (all pages identical) */
-    int imageWidth = maxImageWidth;
-    int imageHeight = maxImageHeight;
+    /* Calculate image dimensions based on number of files needed */
+    int imageWidth, imageHeight;
+    
+    if (numFiles == 1) {
+        /* Single page: size just large enough for grid + footer */
+        int actualGlyphs = totalGlyphs;
+        int actualCols = (actualGlyphs > maxGridCols) ? maxGridCols : actualGlyphs;
+        int actualRows = (actualGlyphs + actualCols - 1) / actualCols;
+        
+        imageWidth = actualCols * cellWidth;
+        imageHeight = actualRows * cellHeight + footerHeight;
+        
+        /* Ensure minimum reasonable size */
+        if (imageWidth < 200) imageWidth = 200;
+        if (imageHeight < 200) imageHeight = 200;
+    } else {
+        /* Multi-page: use uniform maximum dimensions for all pages */
+        imageWidth = maxImageWidth;
+        imageHeight = maxImageHeight;
+    }
 
     /* Calculate font scaling - converts font units to pixels */
     float scale = stt_ScaleForPixelHeight(&info, fontSize);
@@ -288,9 +306,18 @@ int main(int argc, const char *argv[])
         int glyphsInFile = endGlyph - startGlyph;
         
         /* Calculate grid dimensions for this file */
-        int gridCols = (glyphsInFile > maxGridCols) ? maxGridCols : 
+        int gridCols, gridRows;
+        
+        if (numFiles == 1) {
+            /* Single page: use actual dimensions needed */
+            gridCols = (glyphsInFile > maxGridCols) ? maxGridCols : glyphsInFile;
+            gridRows = (glyphsInFile + gridCols - 1) / gridCols;
+        } else {
+            /* Multi-page: use maximum grid dimensions */
+            gridCols = (glyphsInFile > maxGridCols) ? maxGridCols : 
                        (glyphsInFile <= maxGridCols) ? glyphsInFile : maxGridCols;
-        int gridRows = (glyphsInFile + gridCols - 1) / gridCols;
+            gridRows = (glyphsInFile + gridCols - 1) / gridCols;
+        }
         
         /* Use consistent image dimensions for all files */
         int gridHeight = gridRows * cellHeight;
