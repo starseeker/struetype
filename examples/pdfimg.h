@@ -42,13 +42,20 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-#ifdef PDFIMG_ENABLE_COMPRESSION
+#ifdef ENABLE_MINIZ_COMPRESSION
 #include "miniz.h"
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Image compression types
+enum pdfimg_compression_type {
+    PDFIMG_COMPRESSION_NONE = 0,
+    PDFIMG_COMPRESSION_FLATE,
+    PDFIMG_COMPRESSION_JPEG
+};
 
 typedef struct {
     uint8_t *data;
@@ -111,9 +118,36 @@ static inline void pdfimg_append(pdfimg_doc_t *pdf, const char *fmt, ...) {
     va_end(ap);
 }
 
-// Add one page with an image buffer (gray or rgb)
-static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
-    const uint8_t *buf, int w, int h, int stride, int is_rgb, double dpi)
+#ifdef ENABLE_MINIZ_COMPRESSION
+// Function to compress image data using Flate (zlib)
+static int pdfimg_compress_flate(const uint8_t *input_data, size_t input_size, 
+                                uint8_t **output_data, size_t *output_size) {
+    // Calculate upper bound for compressed data size
+    mz_ulong compressed_size = mz_compressBound(input_size);
+    uint8_t *compressed_data = (uint8_t*)malloc(compressed_size);
+    
+    if (!compressed_data) {
+        return 0;
+    }
+    
+    // Compress the data
+    int result = mz_compress2(compressed_data, &compressed_size, input_data, input_size, 6);
+    
+    if (result != MZ_OK) {
+        free(compressed_data);
+        return 0;
+    }
+    
+    *output_data = compressed_data;
+    *output_size = compressed_size;
+    return 1;
+}
+#endif
+
+// Add one page with an image buffer - supports pre-compressed data
+static inline int pdfimg_add_image_page_with_data(pdfimg_doc_t *pdf,
+    const uint8_t *image_data, size_t image_data_size, int w, int h, int is_rgb, 
+    double dpi, const char *filter_name)
 {
     // PDF units: 1/72 inch, so width = w * 72 / dpi
     double pagew = w * 72.0 / dpi, pageh = h * 72.0 / dpi;
@@ -122,9 +156,6 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
     int img_obj = pdf->next_obj_id++;
     int content_obj = pdf->next_obj_id++;
     int page_obj = pdf->next_obj_id++;
-
-    // Calculate actual image data size
-    int img_data_size = w * h * (is_rgb ? 3 : 1);
     
     // Process image data and determine output size
     int output_size;
@@ -184,23 +215,21 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
         w, h, is_rgb ? "RGB" : "Gray", output_size);
 #else
     pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
-        "/ColorSpace /Device%s /BitsPerComponent 8 /Length %d >>\nstream\n",
-        w, h, is_rgb ? "RGB" : "Gray", output_size);
-#endif
+        "/ColorSpace /Device%s /BitsPerComponent 8%s /Length %zu >>\nstream\n",
+        w, h, is_rgb ? "RGB" : "Gray", filter_name, image_data_size);
     
     // Ensure buffer capacity for image data
-    if (pdf->len + output_size >= pdf->cap) {
-        pdf->cap = pdf->len + output_size + 1024;
+    if (pdf->len + image_data_size >= pdf->cap) {
+        pdf->cap = pdf->len + image_data_size + 1024;
         pdf->data = (uint8_t*)realloc(pdf->data, pdf->cap);
     }
     
-    // Copy processed image data to PDF
-    memcpy(pdf->data + pdf->len, output_data, output_size);
-    pdf->len += output_size;
-    free(output_data);
+    // Copy image data
+    memcpy(pdf->data + pdf->len, image_data, image_data_size);
+    pdf->len += image_data_size;
     
     pdfimg_append(pdf, "\nendstream\nendobj\n");
-
+    
     // Add content stream to draw image
     char bufstr[256];
     int content_len = snprintf(bufstr, sizeof(bufstr),
@@ -211,7 +240,7 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
     pdf->len += content_len;
     pdfimg_append(pdf, "endstream\nendobj\n");
 
-    // Add page object (we'll add /Parent reference later when we know Pages object ID)
+    // Add page object
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n"
         "<< /Type /Page /MediaBox [0 0 %.2f %.2f] "
@@ -226,6 +255,78 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
     pdf->page_objs[pdf->page_count++] = page_obj;
 
     return 1;
+}
+
+// Add one page with an image buffer (gray or rgb) - with compression support
+static inline int pdfimg_add_image_page_compressed(pdfimg_doc_t *pdf,
+    const uint8_t *buf, int w, int h, int stride, int is_rgb, double dpi,
+    enum pdfimg_compression_type compression)
+{
+    // Prepare image data
+    size_t raw_data_size = w * h * (is_rgb ? 3 : 1);
+    uint8_t *image_data = (uint8_t*)malloc(raw_data_size);
+    
+    if (!image_data) {
+        return 0;
+    }
+    
+    // Copy buffer, row by row (stride might be >w)
+    for (int y = 0; y < h; ++y) {
+        memcpy(image_data + y * w * (is_rgb ? 3 : 1), 
+               buf + y * stride, w * (is_rgb ? 3 : 1));
+    }
+    
+    // Compression variables
+    uint8_t *final_data = image_data;
+    size_t final_size = raw_data_size;
+    const char *filter_name = "";
+    int compression_success = 0;
+    
+    // Apply compression based on type
+    switch (compression) {
+        case PDFIMG_COMPRESSION_FLATE:
+#ifdef ENABLE_MINIZ_COMPRESSION
+            {
+                uint8_t *compressed_data;
+                size_t compressed_size;
+                if (pdfimg_compress_flate(image_data, raw_data_size, &compressed_data, &compressed_size)) {
+                    final_data = compressed_data;
+                    final_size = compressed_size;
+                    filter_name = " /Filter /FlateDecode";
+                    compression_success = 1;
+                }
+            }
+#endif
+            break;
+            
+        case PDFIMG_COMPRESSION_JPEG:
+            // JPEG compression will be handled in foview.cpp
+            // This case should not be reached in normal usage
+            break;
+            
+        case PDFIMG_COMPRESSION_NONE:
+        default:
+            // No compression
+            break;
+    }
+    
+    // Use the helper function to add the page
+    int result = pdfimg_add_image_page_with_data(pdf, final_data, final_size, w, h, is_rgb, dpi, filter_name);
+    
+    // Clean up
+    if (compression_success && final_data != image_data) {
+        free(final_data);
+    }
+    free(image_data);
+    
+    return result;
+}
+
+// Add one page with an image buffer (gray or rgb) - legacy function for backward compatibility
+static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
+    const uint8_t *buf, int w, int h, int stride, int is_rgb, double dpi)
+{
+    return pdfimg_add_image_page_compressed(pdf, buf, w, h, stride, is_rgb, dpi, PDFIMG_COMPRESSION_NONE);
 }
 
 static inline int pdfimg_save(pdfimg_doc_t *pdf, const char *filename) {

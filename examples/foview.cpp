@@ -44,15 +44,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <libgen.h>
+#include <iostream>
+#include <string>
+#include <vector>
 #define STRUETYPE_IMPLEMENTATION
 #include "struetype.h"
 #include "svpng.h"
 #include "pdfimg.h"
+#ifdef ENABLE_TOOJPEG_COMPRESSION
 #include "toojpeg.h"
+#endif
 #include "cxxopts.hpp"
 
 /* Embedded ProFont.ttf data for footer rendering */
 #include "profont_embedded.h"
+
+/* Compression types */
+enum CompressionType {
+    COMPRESSION_NONE = 0,
+    COMPRESSION_FLATE,
+    COMPRESSION_JPEG
+};
 
 /* Structure to hold image data for later output */
 typedef struct {
@@ -206,46 +218,178 @@ void render_footer(stt_fontinfo *mainInfo, unsigned char *buffer, int imageWidth
     }
 }
 
+/* Function to convert CompressionType to pdfimg_compression_type */
+static enum pdfimg_compression_type convert_compression_type(CompressionType compression) {
+    switch (compression) {
+        case COMPRESSION_FLATE:
+            return PDFIMG_COMPRESSION_FLATE;
+        case COMPRESSION_JPEG:
+            return PDFIMG_COMPRESSION_JPEG;
+        case COMPRESSION_NONE:
+        default:
+            return PDFIMG_COMPRESSION_NONE;
+    }
+}
+
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+/* Helper structure to collect JPEG bytes */
+struct JpegDataCollector {
+    std::vector<uint8_t> data;
+};
+
+/* Callback for TooJpeg to collect bytes */
+static JpegDataCollector* g_jpeg_collector = nullptr;
+
+void jpeg_output_callback(unsigned char byte) {
+    if (g_jpeg_collector) {
+        g_jpeg_collector->data.push_back(byte);
+    }
+}
+
+/* Function to compress image data using JPEG */
+static bool compress_image_jpeg(const uint8_t *image_data, int width, int height, 
+                               bool is_rgb, std::vector<uint8_t>& compressed_data) {
+    JpegDataCollector collector;
+    g_jpeg_collector = &collector;
+    
+    bool success = TooJpeg::writeJpeg(jpeg_output_callback, image_data, width, height, 
+                                     is_rgb, 85, false, nullptr);
+    
+    g_jpeg_collector = nullptr;
+    
+    if (success) {
+        compressed_data = std::move(collector.data);
+        return true;
+    }
+    return false;
+}
+#endif
+CompressionType get_default_compression() {
+#ifdef ENABLE_MINIZ_COMPRESSION
+    return COMPRESSION_FLATE;
+#elif defined(ENABLE_TOOJPEG_COMPRESSION)
+    return COMPRESSION_JPEG;
+#else
+    return COMPRESSION_NONE;
+#endif
+}
+
+/* Function to get available compression methods as a string */
+std::string get_available_compression_methods() {
+    std::string methods = "none";
+#ifdef ENABLE_MINIZ_COMPRESSION
+    methods += ", flate";
+#endif
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+    methods += ", jpeg";
+#endif
+    return methods;
+}
+
 int main(int argc, const char *argv[])
 {
-    /* Check for help request */
-    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
-        printf("Usage: %s [font_file] [output_prefix]\n", argv[0]);
-        printf("\nGenerate PNG and/or PDF images showing all available glyphs in a font.\n");
-        printf("PDFs are generated with strict PDF 1.4 compliance for compatibility with\n");
-        printf("viewers like Evince and other strict PDF readers.\n");
-        printf("\nArguments:\n");
-        printf("  font_file     Path to TrueType font file (default: profont/ProFont.ttf)\n");
-        printf("  output_prefix Output file prefix (default: derived from font filename)\n");
-        printf("\nOutput behavior:\n");
-        printf("  Single page:  Creates both <prefix>.png and <prefix>.pdf\n");
-        printf("  Multiple pages: Creates only <prefix>.pdf with all pages\n");
-        printf("\nPDF Features:\n");
-        printf("  - Strict PDF 1.4 compliance for maximum compatibility\n");
-        printf("  - Proper object references and xref tables\n");
-        printf("  - Correct stream lengths and PDF structure\n");
-#ifdef PDFIMG_ENABLE_COMPRESSION
-        printf("  - Compressed image data using Flate (zlib/deflate) compression\n");
-        printf("  - /Filter /FlateDecode streams for significantly smaller file sizes\n");
+    std::string fontPathStr = "profont/ProFont.ttf";
+    std::string outputPrefixStr = "";
+    CompressionType compression = get_default_compression();
+    
+    try {
+        // Set up command line options
+        cxxopts::Options options("foview", "Generate PNG and/or PDF images showing all available glyphs in a font");
+        
+        options.add_options()
+            ("f,font", "TrueType font file", cxxopts::value<std::string>()->default_value("profont/ProFont.ttf"))
+            ("o,output", "Output file prefix (default: derived from font filename)", cxxopts::value<std::string>())
+            ("c,compression", "Compression method for PDF images: " + get_available_compression_methods(), 
+             cxxopts::value<std::string>()->default_value(
+                 get_default_compression() == COMPRESSION_FLATE ? "flate" :
+                 get_default_compression() == COMPRESSION_JPEG ? "jpeg" : "none"))
+            ("h,help", "Show this help message")
+            ("positional", "Positional arguments (for backward compatibility)", cxxopts::value<std::vector<std::string>>())
+            ;
+        
+        // Allow positional arguments for backward compatibility
+        options.parse_positional({"positional"});
+        
+        // Parse command line arguments
+        auto result = options.parse(argc, argv);
+        
+        // Handle help
+        if (result.count("help")) {
+            std::cout << options.help() << std::endl;
+            std::cout << "\nOutput behavior:" << std::endl;
+            std::cout << "  Single page:  Creates both <prefix>.png and <prefix>.pdf" << std::endl;
+            std::cout << "  Multiple pages: Creates only <prefix>.pdf with all pages" << std::endl;
+            std::cout << "\nPDF Features:" << std::endl;
+            std::cout << "  - Strict PDF 1.4 compliance for maximum compatibility" << std::endl;
+            std::cout << "  - Proper object references and xref tables" << std::endl;
+            std::cout << "  - Correct stream lengths and PDF structure" << std::endl;
+            std::cout << "  - Configurable image compression (";
+            std::cout << get_available_compression_methods() << ")" << std::endl;
+            std::cout << "\nExamples:" << std::endl;
+            std::cout << "  foview                                    # Uses default font and compression" << std::endl;
+            std::cout << "  foview -f arial.ttf                      # Uses arial.ttf font" << std::endl;
+            std::cout << "  foview -f arial.ttf -o myfont            # Custom output prefix" << std::endl;
+            std::cout << "  foview -f arial.ttf -c flate             # Use Flate compression" << std::endl;
+            std::cout << "  foview -f arial.ttf -c jpeg              # Use JPEG compression" << std::endl;
+            std::cout << "  foview -f arial.ttf -c none              # Use no compression" << std::endl;
+            std::cout << "\nBackward compatibility:" << std::endl;
+            std::cout << "  foview font.ttf                          # Uses font.ttf (old format)" << std::endl;
+            std::cout << "  foview font.ttf output_name              # Uses font.ttf with output prefix (old format)" << std::endl;
+            return 0;
+        }
+        
+        // Get parsed values
+        fontPathStr = result["font"].as<std::string>();
+        outputPrefixStr = result.count("output") ? result["output"].as<std::string>() : "";
+        std::string compressionStr = result["compression"].as<std::string>();
+        
+        // Handle backward compatibility with positional arguments (for tests)
+        if (result.count("positional")) {
+            const auto& positional = result["positional"].as<std::vector<std::string>>();
+            if (!positional.empty()) {
+                // If we have positional arguments, treat them as the old format
+                // foview [font_file] [output_prefix]
+                fontPathStr = positional[0];
+                if (positional.size() > 1) {
+                    outputPrefixStr = positional[1];
+                }
+            }
+        }
+        
+        // Parse compression type
+        if (compressionStr == "flate") {
+#ifdef ENABLE_MINIZ_COMPRESSION
+            compression = COMPRESSION_FLATE;
 #else
-        printf("  - Uncompressed image data (compression can be enabled at compile time)\n");
+            std::cerr << "Error: Flate compression not available (build with ENABLE_MINIZ_COMPRESSION=ON)" << std::endl;
+            return 1;
 #endif
-        printf("\nExamples:\n");
-        printf("  %s                                    # Uses default font, creates ProFont.png + ProFont.pdf\n", argv[0]);
-        printf("  %s arial.ttf                         # Creates arial.png + arial.pdf (if single page)\n", argv[0]);
-        printf("  %s arial.ttf myfont                  # Creates myfont.png + myfont.pdf (if single page)\n", argv[0]);
-        printf("  %s large_font.ttf                    # Creates large_font.pdf only (if multiple pages)\n", argv[0]);
-#ifndef PDFIMG_ENABLE_COMPRESSION
-        printf("\nCompression Support:\n");
-        printf("  To enable PDF image stream compression, compile with -DPDFIMG_ENABLE_COMPRESSION\n");
-        printf("  This uses miniz for Flate compression and can reduce file sizes by 90%% or more.\n");
+        } else if (compressionStr == "jpeg") {
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+            compression = COMPRESSION_JPEG;
+#else
+            std::cerr << "Error: JPEG compression not available (build with ENABLE_TOOJPEG_COMPRESSION=ON)" << std::endl;
+            return 1;
 #endif
-        return 0;
+        } else if (compressionStr == "none") {
+            compression = COMPRESSION_NONE;
+        } else {
+            std::cerr << "Error: Invalid compression method '" << compressionStr << "'. Available methods: " 
+                      << get_available_compression_methods() << std::endl;
+            return 1;
+        }
+        
+        printf("Font: %s\n", fontPathStr.c_str());
+        printf("Compression: %s\n", compressionStr.c_str());
+        
+    } catch (const cxxopts::exceptions::exception& e) {
+        std::cerr << "Error parsing options: " << e.what() << std::endl;
+        return 1;
     }
-
-    /* Parse command line arguments */
-    const char *fontPath = (argc > 1) ? argv[1] : "profont/ProFont.ttf";
-    const char *outputPrefix = (argc > 2) ? argv[2] : NULL;
+    
+    // Convert to C strings for legacy code compatibility
+    const char *fontPath = fontPathStr.c_str();
+    const char *outputPrefix = outputPrefixStr.empty() ? NULL : outputPrefixStr.c_str();
 
     /* Configuration constants */
     const int cellWidth = 48;    /* Width of each cell in pixels */
@@ -517,8 +661,26 @@ int main(int argc, const char *argv[])
         
         pdfimg_doc_t *pdf = pdfimg_create();
         if (pdf) {
-            pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
-                                img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+            enum pdfimg_compression_type pdf_compression = convert_compression_type(compression);
+            
+            if (compression == COMPRESSION_JPEG) {
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+                // Handle JPEG compression specially in C++ context
+                std::vector<uint8_t> jpeg_data;
+                if (compress_image_jpeg(img->rgbBuffer, img->width, img->height, true, jpeg_data)) {
+                    pdfimg_add_image_page_with_data(pdf, jpeg_data.data(), jpeg_data.size(), 
+                                                  img->width, img->height, 1, 72.0, " /Filter /DCTDecode");
+                } else {
+                    printf("JPEG compression failed, falling back to uncompressed\n");
+                    pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                   img->width * 3, 1, 72.0, PDFIMG_COMPRESSION_NONE);
+                }
+#endif
+            } else {
+                pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                               img->width * 3, 1, 72.0, pdf_compression);
+            }
+            
             if (pdfimg_save(pdf, pdfFilename)) {
                 printf("Font grid saved to %s\n", pdfFilename);
             } else {
@@ -534,11 +696,30 @@ int main(int argc, const char *argv[])
         
         pdfimg_doc_t *pdf = pdfimg_create();
         if (pdf) {
+            enum pdfimg_compression_type pdf_compression = convert_compression_type(compression);
+            
             for (int i = 0; i < numFiles; i++) {
                 ImageData *img = &images[i];
-                pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
-                                    img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+                
+                if (compression == COMPRESSION_JPEG) {
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+                    // Handle JPEG compression specially in C++ context
+                    std::vector<uint8_t> jpeg_data;
+                    if (compress_image_jpeg(img->rgbBuffer, img->width, img->height, true, jpeg_data)) {
+                        pdfimg_add_image_page_with_data(pdf, jpeg_data.data(), jpeg_data.size(), 
+                                                      img->width, img->height, 1, 72.0, " /Filter /DCTDecode");
+                    } else {
+                        printf("JPEG compression failed for page %d, falling back to uncompressed\n", i + 1);
+                        pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                       img->width * 3, 1, 72.0, PDFIMG_COMPRESSION_NONE);
+                    }
+#endif
+                } else {
+                    pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                   img->width * 3, 1, 72.0, pdf_compression);
+                }
             }
+            
             if (pdfimg_save(pdf, pdfFilename)) {
                 printf("Multi-page font grid saved to %s (%d pages)\n", pdfFilename, numFiles);
             } else {

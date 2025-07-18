@@ -1,12 +1,26 @@
-include_directories(
-  "${CMAKE_CURRENT_SOURCE_DIR}/miniz"
-  "${CMAKE_CURRENT_SOURCE_DIR}/toojpeg"
-  )
+# Compression options - default ON for both
+option(ENABLE_MINIZ_COMPRESSION "Enable miniz (Flate) compression support" ON)
+option(ENABLE_TOOJPEG_COMPRESSION "Enable toojpeg (JPEG) compression support" ON)
 
-# Option to enable PDF image compression
-option(PDFIMG_ENABLE_COMPRESSION "Enable PDF image stream compression using miniz" OFF)
+# Set up includes and sources based on enabled compression options
+set(FOVIEW_SOURCES foview.cpp)
+set(FOVIEW_INCLUDES "")
 
-add_executable(foview foview.cpp miniz/miniz.c toojpeg/toojpeg.cpp)
+if (ENABLE_MINIZ_COMPRESSION)
+  list(APPEND FOVIEW_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/miniz")
+  list(APPEND FOVIEW_SOURCES miniz/miniz.c)
+  add_definitions(-DENABLE_MINIZ_COMPRESSION)
+endif()
+
+if (ENABLE_TOOJPEG_COMPRESSION)
+  list(APPEND FOVIEW_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/toojpeg")
+  list(APPEND FOVIEW_SOURCES toojpeg/toojpeg.cpp)
+  add_definitions(-DENABLE_TOOJPEG_COMPRESSION)
+endif()
+
+include_directories(${FOVIEW_INCLUDES})
+add_executable(foview ${FOVIEW_SOURCES})
+
 if (M_LIBRARY)
   target_link_libraries(foview ${M_LIBRARY})
 endif (M_LIBRARY)
