@@ -224,12 +224,22 @@ int main(int argc, const char *argv[])
         printf("  - Strict PDF 1.4 compliance for maximum compatibility\n");
         printf("  - Proper object references and xref tables\n");
         printf("  - Correct stream lengths and PDF structure\n");
-        printf("  - Uncompressed image data (compression can be added if needed)\n");
+#ifdef PDFIMG_ENABLE_COMPRESSION
+        printf("  - Compressed image data using Flate (zlib/deflate) compression\n");
+        printf("  - /Filter /FlateDecode streams for significantly smaller file sizes\n");
+#else
+        printf("  - Uncompressed image data (compression can be enabled at compile time)\n");
+#endif
         printf("\nExamples:\n");
         printf("  %s                                    # Uses default font, creates ProFont.png + ProFont.pdf\n", argv[0]);
         printf("  %s arial.ttf                         # Creates arial.png + arial.pdf (if single page)\n", argv[0]);
         printf("  %s arial.ttf myfont                  # Creates myfont.png + myfont.pdf (if single page)\n", argv[0]);
         printf("  %s large_font.ttf                    # Creates large_font.pdf only (if multiple pages)\n", argv[0]);
+#ifndef PDFIMG_ENABLE_COMPRESSION
+        printf("\nCompression Support:\n");
+        printf("  To enable PDF image stream compression, compile with -DPDFIMG_ENABLE_COMPRESSION\n");
+        printf("  This uses miniz for Flate compression and can reduce file sizes by 90%% or more.\n");
+#endif
         return 0;
     }
 
