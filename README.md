@@ -1,5 +1,7 @@
-# struetype
-Fork of the stb_truetype.h font header from https://github.com/nothings/stb
+# struetype.h
+
+Fork of the stb_truetype.h v1.26 font header originally from
+https://github.com/nothings/stb
 
 Makes API changes to address the 2020/2022 CVE reports, which are considered
 out of scope by upstream. The specific CVE reports in question are:
@@ -15,9 +17,11 @@ out of scope by upstream. The specific CVE reports in question are:
 * CVE-2020-6618
 * CVE-2020-6617
 
-The test cases in the reports are set up to be runnable, making sure we can
-reproduce the failures.  The code and files are from https://github.com/Vincebye
-Github issues associated with these CVEs.
+The test cases in the reports are set up to be runnable with make test,
+ensuring we can reproduce and test the failure cases.  The code and files are
+from https://github.com/Vincebye Github issues associated with these CVEs.
 
 The API changes are (and must be) breaking, since addressing the problems
 requires knowledge about buffer sizes the original APIs don't provide.
+Accordingly, we have renamed the header and changed the function names to
+use a different prefix.
