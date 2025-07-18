@@ -188,8 +188,8 @@ void render_footer(ImagePage& page, int footer_height) {
 
     // Create footer text
     std::string footer_text = "Font: " + page.font_name() +
-                             " U+" + std::to_string(page.start_codepoint()) +
-                             "-U+" + std::to_string(page.end_codepoint());
+                             "(U+" + std::to_string(page.start_codepoint()) +
+                             "-U+" + std::to_string(page.end_codepoint()) + ")";
 
     // Initialize embedded ProFont for footer rendering
     stt_fontinfo footer_font;
