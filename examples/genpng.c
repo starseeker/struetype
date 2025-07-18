@@ -9,8 +9,9 @@
  * 5. Center each glyph visually in its grid cell using font metrics
  * 6. Render characters darker on light background using simple subtraction
  * 7. Convert grayscale bitmap to RGB format
- * 8. Automatically split output into multiple PNG files if needed to stay within 1024x1024 limit
- * 9. Save results with numbered suffixes (e.g., ProFont-01.png, ProFont-02.png, ...)
+ * 8. Automatically split output into multiple PNG files if needed to stay within size limits
+ * 9. Smart output naming: single file as .png, multiple files as <root>-01.png, etc.
+ * 10. Add footer with font name and Unicode range using the font itself
  *
  * Key rendering features:
  * - Uses font ascent/descent metrics to calculate proper baseline positioning
@@ -18,11 +19,20 @@
  * - Ignores xOffset/yOffset for cleaner visual centering
  * - Simple subtraction blending for crisp, dark text on light background
  * - Scans entire Unicode range using stt_FindGlyphIndex to find available glyphs
- * - Automatically creates multiple files when needed, keeping 1024x1024 size limit
+ * - Target maximum image size of 2450x3200 pixels (portrait, 300dpi print ready)
+ * - All pages have identical dimensions for consistent output
+ * - Footer displays font name and Unicode range using the font being visualized
+ *
+ * Enhanced features:
+ * - Smart output naming: single image without suffix, multiple with zero-padded numbers
+ * - Footer strip below grid showing font name and Unicode range
+ * - Footer rendered using the font itself if all characters are available
+ * - Consistent page dimensions across all output files
+ * - Print-ready 2450x3200 pixel output size (8.17" x 10.67" at 300dpi)
  *
  * Usage: genpng [font_file] [output_prefix]
  * Defaults: genpng profont/ProFont.ttf fontgrid
- * Output: fontgrid-01.png, fontgrid-02.png, etc. (or ProFont-01.png if using default font)
+ * Output: fontgrid.png (single) or fontgrid-01.png, fontgrid-02.png, etc. (multiple)
  */
 
 #include <stdio.h>
@@ -82,6 +92,109 @@ int collect_available_glyphs(stt_fontinfo *info, int **glyphs) {
     return count;
 }
 
+/* Function to extract font name from the font file path */
+void get_font_name(const char *fontPath, char *fontName, size_t bufferSize) {
+    char *fontPathCopy = strdup(fontPath);
+    char *baseName = basename(fontPathCopy);
+    char *dot = strrchr(baseName, '.');
+    if (dot) *dot = '\0';  /* Remove extension */
+    snprintf(fontName, bufferSize, "%s", baseName);
+    free(fontPathCopy);
+}
+
+/* Function to check if all characters in a string are available in the font */
+int all_chars_available(stt_fontinfo *info, const char *text) {
+    const char *ptr = text;
+    while (*ptr) {
+        int codepoint = (unsigned char)*ptr;
+        if (stt_FindGlyphIndex(info, codepoint) == 0) {
+            return 0; /* Character not available */
+        }
+        ptr++;
+    }
+    return 1; /* All characters available */
+}
+
+/* Function to render footer text using the font */
+void render_footer(stt_fontinfo *info, unsigned char *buffer, int imageWidth, int imageHeight, 
+                   int footerHeight, const char *fontName, int startCodepoint, int endCodepoint) {
+    /* Create footer text */
+    char footerText[256];
+    snprintf(footerText, sizeof(footerText), "Font: %s   U+%04X–U+%04X", 
+             fontName, startCodepoint, endCodepoint);
+    
+    /* Check if all characters are available */
+    if (!all_chars_available(info, footerText)) {
+        return; /* Skip footer if characters not available */
+    }
+    
+    /* Calculate font scaling for footer */
+    float footerScale = stt_ScaleForPixelHeight(info, 14);
+    
+    /* Get font metrics */
+    int ascent, descent, lineGap;
+    stt_GetFontVMetrics(info, &ascent, &descent, &lineGap);
+    
+    /* Calculate text dimensions */
+    int textWidth = 0;
+    const char *ptr = footerText;
+    while (*ptr) {
+        int advance, leftSideBearing;
+        stt_GetCodepointHMetrics(info, *ptr, &advance, &leftSideBearing);
+        textWidth += (int)(advance * footerScale);
+        ptr++;
+    }
+    
+    /* Position footer text (right-aligned) */
+    int footerY = imageHeight - footerHeight + (footerHeight + (int)(ascent * footerScale)) / 2;
+    int footerX = imageWidth - textWidth - 20; /* 20 pixel margin from right */
+    
+    /* Render each character */
+    int currentX = footerX;
+    ptr = footerText;
+    while (*ptr) {
+        int glyphWidth, glyphHeight, xOffset, yOffset;
+        unsigned char *glyphBitmap = stt_GetCodepointBitmap(info, footerScale, footerScale,
+                                                             *ptr, &glyphWidth, &glyphHeight,
+                                                             &xOffset, &yOffset);
+        
+        if (glyphBitmap) {
+            /* Calculate glyph position */
+            int glyphX = currentX + xOffset;
+            int glyphY = footerY + yOffset;
+            
+            /* Copy glyph bitmap to main image buffer */
+            for (int gy = 0; gy < glyphHeight; gy++) {
+                for (int gx = 0; gx < glyphWidth; gx++) {
+                    int imageX = glyphX + gx;
+                    int imageY = glyphY + gy;
+                    
+                    /* Check bounds */
+                    if (imageX >= 0 && imageX < imageWidth &&
+                        imageY >= 0 && imageY < imageHeight) {
+                        unsigned char glyphPixel = glyphBitmap[gy * glyphWidth + gx];
+                        
+                        /* Render characters darker */
+                        int bgPixel = buffer[imageY * imageWidth + imageX];
+                        int darkened = bgPixel - glyphPixel;
+                        if (darkened < 0) darkened = 0;
+                        buffer[imageY * imageWidth + imageX] = darkened;
+                    }
+                }
+            }
+            
+            /* Advance to next character position */
+            int advance, leftSideBearing;
+            stt_GetCodepointHMetrics(info, *ptr, &advance, &leftSideBearing);
+            currentX += (int)(advance * footerScale);
+            
+            /* Free the glyph bitmap */
+            stt_FreeBitmap(glyphBitmap, NULL);
+        }
+        ptr++;
+    }
+}
+
 int main(int argc, const char *argv[])
 {
     /* Parse command line arguments */
@@ -93,12 +206,16 @@ int main(int argc, const char *argv[])
     const int cellHeight = 48;   /* Height of each cell in pixels */
     const int fontSize = 24;     /* Font size in pixels */
     const int drawGridLines = 1; /* Draw faint grid lines */
-    const int maxImageSize = 1024; /* Maximum image dimension */
+    const int maxImageWidth = 2450;  /* Maximum image width (portrait orientation) */
+    const int maxImageHeight = 3200; /* Maximum image height */
+    const int footerHeight = 80;     /* Height reserved for footer */
+    const int footerFontSize = 14;   /* Font size for footer text */
     
-    /* Calculate grid dimensions for maximum image size */
-    const int maxGridCols = maxImageSize / cellWidth;   /* 21 columns */
-    const int maxGridRows = maxImageSize / cellHeight;  /* 21 rows */
-    const int maxGlyphsPerFile = maxGridCols * maxGridRows; /* 441 glyphs per file */
+    /* Calculate available space for grid (excluding footer) */
+    const int availableHeight = maxImageHeight - footerHeight;
+    const int maxGridCols = maxImageWidth / cellWidth;   /* 51 columns */
+    const int maxGridRows = availableHeight / cellHeight; /* 65 rows */
+    const int maxGlyphsPerFile = maxGridCols * maxGridRows; /* 3315 glyphs per file */
 
     /* Get output prefix */
     char finalOutputPrefix[256];
@@ -144,6 +261,14 @@ int main(int argc, const char *argv[])
     int numFiles = (totalGlyphs + maxGlyphsPerFile - 1) / maxGlyphsPerFile;
     printf("Total glyphs: %d, will create %d file(s)\n", totalGlyphs, numFiles);
 
+    /* Get font name for footer */
+    char fontName[256];
+    get_font_name(fontPath, fontName, sizeof(fontName));
+
+    /* Calculate consistent image dimensions (all pages identical) */
+    int imageWidth = maxImageWidth;
+    int imageHeight = maxImageHeight;
+
     /* Calculate font scaling - converts font units to pixels */
     float scale = stt_ScaleForPixelHeight(&info, fontSize);
 
@@ -167,12 +292,16 @@ int main(int argc, const char *argv[])
                        (glyphsInFile <= maxGridCols) ? glyphsInFile : maxGridCols;
         int gridRows = (glyphsInFile + gridCols - 1) / gridCols;
         
-        /* Calculate actual image dimensions */
-        int imageWidth = gridCols * cellWidth;
-        int imageHeight = gridRows * cellHeight;
+        /* Use consistent image dimensions for all files */
+        int gridHeight = gridRows * cellHeight;
         
-        printf("File %d: %dx%d pixels, %dx%d cells, %d glyphs\n",
-               fileIndex + 1, imageWidth, imageHeight, gridCols, gridRows, glyphsInFile);
+        /* Get Unicode range for this page */
+        int startCodepoint = availableGlyphs[startGlyph];
+        int endCodepoint = availableGlyphs[endGlyph - 1];
+        
+        printf("File %d: %dx%d pixels, %dx%d cells, %d glyphs, U+%04X–U+%04X\n",
+               fileIndex + 1, imageWidth, imageHeight, gridCols, gridRows, glyphsInFile,
+               startCodepoint, endCodepoint);
 
         /* Create grayscale image buffer */
         unsigned char *grayBuffer = calloc(imageWidth * imageHeight, sizeof(unsigned char));
@@ -236,7 +365,7 @@ int main(int argc, const char *argv[])
             for (int x = 0; x <= gridCols; x++) {
                 int lineX = x * cellWidth;
                 if (lineX < imageWidth) {
-                    for (int y = 0; y < imageHeight; y++) {
+                    for (int y = 0; y < gridHeight; y++) {
                         grayBuffer[y * imageWidth + lineX] = 200;
                     }
                 }
@@ -244,13 +373,17 @@ int main(int argc, const char *argv[])
             /* Horizontal grid lines */
             for (int y = 0; y <= gridRows; y++) {
                 int lineY = y * cellHeight;
-                if (lineY < imageHeight) {
+                if (lineY < gridHeight) {
                     for (int x = 0; x < imageWidth; x++) {
                         grayBuffer[lineY * imageWidth + x] = 200;
                     }
                 }
             }
         }
+
+        /* Render footer */
+        render_footer(&info, grayBuffer, imageWidth, imageHeight, footerHeight, 
+                     fontName, startCodepoint, endCodepoint);
 
         /* Convert grayscale to RGB */
         unsigned char *rgbBuffer = malloc(imageWidth * imageHeight * 3);
@@ -269,9 +402,15 @@ int main(int argc, const char *argv[])
             rgbBuffer[i * 3 + 2] = gray;
         }
 
-        /* Create output filename with zero-padded number */
+        /* Create output filename with smart naming */
         char outputFilename[512];
-        snprintf(outputFilename, sizeof(outputFilename), "%s-%02d.png", finalOutputPrefix, fileIndex + 1);
+        if (numFiles == 1) {
+            /* Single file: no numeric suffix */
+            snprintf(outputFilename, sizeof(outputFilename), "%s.png", finalOutputPrefix);
+        } else {
+            /* Multiple files: zero-padded numbering */
+            snprintf(outputFilename, sizeof(outputFilename), "%s-%02d.png", finalOutputPrefix, fileIndex + 1);
+        }
 
         /* Write PNG file */
         FILE *outFile = fopen(outputFilename, "wb");
