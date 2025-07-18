@@ -3,7 +3,7 @@ if (M_LIBRARY)
   target_link_libraries(genpng ${M_LIBRARY})
 endif (M_LIBRARY)
 
-add_test(NAME genpng COMMAND genpng ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
+add_test(NAME ProFontGrid COMMAND genpng ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
 
 # Local Variables:
 # tab-width: 8
