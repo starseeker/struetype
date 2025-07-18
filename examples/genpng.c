@@ -43,6 +43,7 @@
 #define STRUETYPE_IMPLEMENTATION
 #include "struetype.h"
 #include "svpng.h"
+#include "pdfimg.h"
 
 /* Embedded ProFont.ttf data for footer rendering */
 #include "profont_embedded.h"
