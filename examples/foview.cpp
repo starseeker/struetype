@@ -60,7 +60,7 @@ private:
 
 public:
     ImagePage(int width, int height, int start_cp, int end_cp, const std::string& font_name)
-        : width_(width), height_(height), start_codepoint_(start_cp), 
+        : width_(width), height_(height), start_codepoint_(start_cp),
           end_codepoint_(end_cp), font_name_(font_name) {
         gray_buffer_.resize(width * height, 240);  // Light gray background
         rgb_buffer_.resize(width * height * 3);
@@ -71,13 +71,13 @@ public:
     const std::vector<uint8_t>& gray_buffer() const { return gray_buffer_; }
     std::vector<uint8_t>& rgb_buffer() { return rgb_buffer_; }
     const std::vector<uint8_t>& rgb_buffer() const { return rgb_buffer_; }
-    
+
     int width() const { return width_; }
     int height() const { return height_; }
     int start_codepoint() const { return start_codepoint_; }
     int end_codepoint() const { return end_codepoint_; }
     const std::string& font_name() const { return font_name_; }
-    
+
     void convert_gray_to_rgb() {
         for (size_t i = 0; i < gray_buffer_.size(); ++i) {
             uint8_t gray = gray_buffer_[i];
@@ -105,7 +105,7 @@ public:
 
         auto size = file.tellg();
         file.seekg(0, std::ios::beg);
-        
+
         font_buffer_ = std::make_unique<uint8_t[]>(size);
         if (!file.read(reinterpret_cast<char*>(font_buffer_.get()), size)) {
             throw std::runtime_error("Failed to read font file: " + font_path);
@@ -114,12 +114,12 @@ public:
         if (!stt_InitFont(&font_info_, font_buffer_.get(), size, 0)) {
             throw std::runtime_error("Failed to initialize font");
         }
-        
+
         initialized_ = true;
     }
 
     ~FontRenderer() = default;
-    
+
     // Non-copyable but moveable
     FontRenderer(const FontRenderer&) = delete;
     FontRenderer& operator=(const FontRenderer&) = delete;
@@ -128,18 +128,18 @@ public:
 
     stt_fontinfo* get_font_info() { return &font_info_; }
     bool is_initialized() const { return initialized_; }
-    
+
     std::vector<int> collect_available_glyphs() const {
         std::vector<int> glyphs;
         glyphs.reserve(1000);  // Reserve reasonable capacity
-        
+
         // Scan the entire Unicode range
         for (int codepoint = 0; codepoint <= 0x10FFFF; ++codepoint) {
             if (stt_FindGlyphIndex(&font_info_, codepoint) != 0) {
                 glyphs.push_back(codepoint);
             }
         }
-        
+
         return glyphs;
     }
 };
@@ -149,18 +149,18 @@ std::string get_output_prefix(const std::string& font_path, const std::string& u
     if (!user_prefix.empty()) {
         return user_prefix;
     }
-    
+
     // Extract filename without extension from font path
     char* font_path_copy = strdup(font_path.c_str());
     char* base_name = basename(font_path_copy);
     std::string result(base_name);
-    
+
     // Remove extension
     size_t dot_pos = result.find_last_of('.');
     if (dot_pos != std::string::npos) {
         result = result.substr(0, dot_pos);
     }
-    
+
     free(font_path_copy);
     return result;
 }
@@ -169,13 +169,13 @@ std::string get_font_name(const std::string& font_path) {
     char* font_path_copy = strdup(font_path.c_str());
     char* base_name = basename(font_path_copy);
     std::string result(base_name);
-    
+
     // Remove extension
     size_t dot_pos = result.find_last_of('.');
     if (dot_pos != std::string::npos) {
         result = result.substr(0, dot_pos);
     }
-    
+
     free(font_path_copy);
     return result;
 }
@@ -185,25 +185,25 @@ void render_footer(ImagePage& page, int footer_height) {
     auto& buffer = page.gray_buffer();
     const int image_width = page.width();
     const int image_height = page.height();
-    
+
     // Create footer text
-    std::string footer_text = "Font: " + page.font_name() + 
-                             " U+" + std::to_string(page.start_codepoint()) + 
+    std::string footer_text = "Font: " + page.font_name() +
+                             " U+" + std::to_string(page.start_codepoint()) +
                              "-U+" + std::to_string(page.end_codepoint());
-    
+
     // Initialize embedded ProFont for footer rendering
     stt_fontinfo footer_font;
     if (!stt_InitFont(&footer_font, profont_ttf_data, profont_ttf_data_len, 0)) {
         return;  // Skip footer if ProFont fails to load
     }
-    
+
     // Calculate font scaling for footer
     float footer_scale = stt_ScaleForPixelHeight(&footer_font, 14);
-    
+
     // Get font metrics
     int ascent, descent, lineGap;
     stt_GetFontVMetrics(&footer_font, &ascent, &descent, &lineGap);
-    
+
     // Calculate text dimensions
     int text_width = 0;
     for (char c : footer_text) {
@@ -211,11 +211,11 @@ void render_footer(ImagePage& page, int footer_height) {
         stt_GetCodepointHMetrics(&footer_font, c, &advance, &leftSideBearing);
         text_width += static_cast<int>(advance * footer_scale);
     }
-    
+
     // Position footer text (right-aligned)
     int footer_y = image_height - footer_height + (footer_height + static_cast<int>(ascent * footer_scale)) / 2;
     int footer_x = image_width - text_width - 20;  // 20 pixel margin from right
-    
+
     // Render each character
     int current_x = footer_x;
     for (char c : footer_text) {
@@ -223,23 +223,23 @@ void render_footer(ImagePage& page, int footer_height) {
         uint8_t* glyph_bitmap = stt_GetCodepointBitmap(&footer_font, footer_scale, footer_scale,
                                                        c, &glyph_width, &glyph_height,
                                                        &x_offset, &y_offset);
-        
+
         if (glyph_bitmap) {
             // Calculate glyph position
             int glyph_x = current_x + x_offset;
             int glyph_y = footer_y + y_offset;
-            
+
             // Copy glyph bitmap to main image buffer
             for (int gy = 0; gy < glyph_height; ++gy) {
                 for (int gx = 0; gx < glyph_width; ++gx) {
                     int image_x = glyph_x + gx;
                     int image_y = glyph_y + gy;
-                    
+
                     // Check bounds
                     if (image_x >= 0 && image_x < image_width &&
                         image_y >= 0 && image_y < image_height) {
                         uint8_t glyph_pixel = glyph_bitmap[gy * glyph_width + gx];
-                        
+
                         // Render characters darker
                         int bg_pixel = buffer[image_y * image_width + image_x];
                         int darkened = bg_pixel - glyph_pixel;
@@ -248,12 +248,12 @@ void render_footer(ImagePage& page, int footer_height) {
                     }
                 }
             }
-            
+
             // Advance to next character position
             int advance, leftSideBearing;
             stt_GetCodepointHMetrics(&footer_font, c, &advance, &leftSideBearing);
             current_x += static_cast<int>(advance * footer_scale);
-            
+
             // Free the glyph bitmap
             stt_FreeBitmap(glyph_bitmap, nullptr);
         }
@@ -318,36 +318,36 @@ int main(int argc, const char* argv[]) {
         constexpr int max_image_width = 1500;
         constexpr int max_image_height = 2000;
         constexpr int footer_height = 80;
-        
+
         // Calculate grid limits
         constexpr int available_height = max_image_height - footer_height;
         constexpr int max_grid_cols = max_image_width / cell_width;
         constexpr int max_grid_rows = available_height / cell_height;
         constexpr int max_glyphs_per_file = max_grid_cols * max_grid_rows;
-        
+
         // Default values
         std::string font_path = "profont/ProFont.ttf";
         std::string output_prefix;
         pdfimg::CompressionType compression = get_default_compression();
-        
+
         // Set up command line options
         cxxopts::Options options("foview", "Generate PNG and/or PDF images showing all available glyphs in a font");
-        
+
         options.add_options()
             ("f,font", "TrueType font file", cxxopts::value<std::string>()->default_value("profont/ProFont.ttf"))
             ("o,output", "Output file prefix (default: derived from font filename)", cxxopts::value<std::string>())
-            ("c,compression", "Compression method for PDF images: " + get_available_compression_methods(), 
+            ("c,compression", "Compression method for PDF images: " + get_available_compression_methods(),
              cxxopts::value<std::string>()->default_value(compression_type_to_string_local(get_default_compression())))
             ("h,help", "Show this help message")
             ("positional", "Positional arguments", cxxopts::value<std::vector<std::string>>())
             ;
-        
+
         // Allow positional arguments
         options.parse_positional({"positional"});
-        
+
         // Parse command line arguments
         auto result = options.parse(argc, argv);
-        
+
         // Handle help
         if (result.count("help")) {
             std::cout << options.help() << std::endl;
@@ -364,7 +364,7 @@ int main(int argc, const char* argv[]) {
             std::cout << "  - Strict PDF 1.4 compliance for maximum compatibility" << std::endl;
             std::cout << "  - Configurable image compression (" << get_available_compression_methods() << ")" << std::endl;
             std::cout << "\nExamples:" << std::endl;
-            std::cout << "  foview                                    # Uses default font and compression" << std::endl;
+            std::cout << "  foview                                   # Uses default font and compression" << std::endl;
             std::cout << "  foview arial.ttf                         # Font as positional argument" << std::endl;
             std::cout << "  foview arial.ttf myfont                  # Font and output prefix as positional" << std::endl;
             std::cout << "  foview -f arial.ttf                      # Uses arial.ttf font with named option" << std::endl;
@@ -372,14 +372,14 @@ int main(int argc, const char* argv[]) {
             std::cout << "  foview -c flate arial.ttf                # Mixed named and positional arguments" << std::endl;
             return 0;
         }
-        
+
         // Get values from named options
         font_path = result["font"].as<std::string>();
         if (result.count("output")) {
             output_prefix = result["output"].as<std::string>();
         }
         std::string compression_str = result["compression"].as<std::string>();
-        
+
         // Handle backward compatibility with positional arguments
         if (result.count("positional")) {
             const auto& positional = result["positional"].as<std::vector<std::string>>();
@@ -390,46 +390,46 @@ int main(int argc, const char* argv[]) {
                 }
             }
         }
-        
+
         // Parse compression type
         compression = parse_compression_type(compression_str);
-        
+
         // Get final output prefix
         std::string final_output_prefix = get_output_prefix(font_path, output_prefix);
-        
+
         std::cout << "Font: " << font_path << std::endl;
         std::cout << "Output prefix: " << final_output_prefix << std::endl;
         std::cout << "Compression: " << compression_str << std::endl;
-        std::cout << "Max glyphs per file: " << max_glyphs_per_file << " (grid: " 
+        std::cout << "Max glyphs per file: " << max_glyphs_per_file << " (grid: "
                   << max_grid_cols << "x" << max_grid_rows << ")" << std::endl;
-        
+
         // Initialize font renderer
         FontRenderer font_renderer(font_path);
-        
+
         // Collect all available glyphs
         auto available_glyphs = font_renderer.collect_available_glyphs();
         if (available_glyphs.empty()) {
             throw std::runtime_error("No glyphs found in font");
         }
-        
+
         int total_glyphs = static_cast<int>(available_glyphs.size());
         int num_files = (total_glyphs + max_glyphs_per_file - 1) / max_glyphs_per_file;
-        
+
         std::cout << "Found " << total_glyphs << " glyphs, will create " << num_files << " file(s)" << std::endl;
-        
+
         // Get font name for footer
         std::string font_name = get_font_name(font_path);
-        
+
         // Calculate font scaling
         float scale = stt_ScaleForPixelHeight(font_renderer.get_font_info(), font_size);
-        
+
         // Get font metrics for baseline calculation
         int ascent, descent, lineGap;
         stt_GetFontVMetrics(font_renderer.get_font_info(), &ascent, &descent, &lineGap);
-        
+
         // Calculate baseline position to center font vertically in cell
         float baseline = (cell_height / 2.0f) + ((ascent - descent) / 2.0f * scale) - (ascent * scale);
-        
+
         // Calculate image dimensions
         int image_width, image_height;
         if (num_files == 1) {
@@ -437,10 +437,10 @@ int main(int argc, const char* argv[]) {
             int actual_glyphs = total_glyphs;
             int actual_cols = std::min(actual_glyphs, max_grid_cols);
             int actual_rows = (actual_glyphs + actual_cols - 1) / actual_cols;
-            
+
             image_width = actual_cols * cell_width;
             image_height = actual_rows * cell_height + footer_height;
-            
+
             // Ensure minimum reasonable size
             image_width = std::max(image_width, 200);
             image_height = std::max(image_height, 200);
@@ -449,65 +449,65 @@ int main(int argc, const char* argv[]) {
             image_width = max_image_width;
             image_height = max_image_height;
         }
-        
+
         // Generate image pages
         std::vector<std::unique_ptr<ImagePage>> pages;
-        
+
         for (int file_index = 0; file_index < num_files; ++file_index) {
             int start_glyph = file_index * max_glyphs_per_file;
             int end_glyph = std::min(start_glyph + max_glyphs_per_file, total_glyphs);
             int glyphs_in_file = end_glyph - start_glyph;
-            
+
             // Calculate grid dimensions for this file
             int grid_cols = std::min(glyphs_in_file, max_grid_cols);
             int grid_rows = (glyphs_in_file + grid_cols - 1) / grid_cols;
-            
+
             // Get Unicode range for this page
             int start_codepoint = available_glyphs[start_glyph];
             int end_codepoint = available_glyphs[end_glyph - 1];
-            
-            std::cout << "File " << (file_index + 1) << ": " << image_width << "x" << image_height 
-                      << " pixels, " << grid_cols << "x" << grid_rows << " cells, " << glyphs_in_file 
-                      << " glyphs, U+" << std::hex << start_codepoint << "–U+" << end_codepoint 
+
+            std::cout << "File " << (file_index + 1) << ": " << image_width << "x" << image_height
+                      << " pixels, " << grid_cols << "x" << grid_rows << " cells, " << glyphs_in_file
+                      << " glyphs, U+" << std::hex << start_codepoint << "–U+" << end_codepoint
                       << std::dec << std::endl;
-            
+
             // Create image page
-            auto page = std::make_unique<ImagePage>(image_width, image_height, start_codepoint, 
+            auto page = std::make_unique<ImagePage>(image_width, image_height, start_codepoint,
                                                    end_codepoint, font_name);
-            
+
             // Render glyphs for this file
             for (int i = 0; i < glyphs_in_file; ++i) {
                 int codepoint = available_glyphs[start_glyph + i];
                 int row = i / grid_cols;
                 int col = i % grid_cols;
-                
+
                 // Get glyph bitmap
                 int glyph_width, glyph_height, x_offset, y_offset;
-                uint8_t* glyph_bitmap = stt_GetCodepointBitmap(font_renderer.get_font_info(), 
-                                                               scale, scale, codepoint, 
+                uint8_t* glyph_bitmap = stt_GetCodepointBitmap(font_renderer.get_font_info(),
+                                                               scale, scale, codepoint,
                                                                &glyph_width, &glyph_height,
                                                                &x_offset, &y_offset);
-                
+
                 if (glyph_bitmap) {
                     // Calculate glyph position using baseline-centered approach
                     int cell_x = col * cell_width;
                     int cell_y = row * cell_height;
                     int glyph_x = cell_x + (cell_width - glyph_width) / 2;
                     int glyph_y = cell_y + static_cast<int>(baseline);
-                    
+
                     auto& buffer = page->gray_buffer();
-                    
+
                     // Copy glyph bitmap to main image buffer
                     for (int gy = 0; gy < glyph_height; ++gy) {
                         for (int gx = 0; gx < glyph_width; ++gx) {
                             int image_x = glyph_x + gx;
                             int image_y = glyph_y + gy;
-                            
+
                             // Check bounds
                             if (image_x >= 0 && image_x < image_width &&
                                 image_y >= 0 && image_y < image_height) {
                                 uint8_t glyph_pixel = glyph_bitmap[gy * glyph_width + gx];
-                                
+
                                 // Render characters darker
                                 int bg_pixel = buffer[image_y * image_width + image_x];
                                 int darkened = bg_pixel - glyph_pixel;
@@ -516,17 +516,17 @@ int main(int argc, const char* argv[]) {
                             }
                         }
                     }
-                    
+
                     // Free the glyph bitmap
                     stt_FreeBitmap(glyph_bitmap, nullptr);
                 }
             }
-            
+
             // Draw grid lines if enabled
             if (draw_grid_lines) {
                 auto& buffer = page->gray_buffer();
                 int grid_height = grid_rows * cell_height;
-                
+
                 // Vertical grid lines
                 for (int x = 0; x <= grid_cols; ++x) {
                     int line_x = x * cell_width;
@@ -536,7 +536,7 @@ int main(int argc, const char* argv[]) {
                         }
                     }
                 }
-                
+
                 // Horizontal grid lines
                 for (int y = 0; y <= grid_rows; ++y) {
                     int line_y = y * cell_height;
@@ -547,21 +547,21 @@ int main(int argc, const char* argv[]) {
                     }
                 }
             }
-            
+
             // Render footer
             render_footer(*page, footer_height);
-            
+
             // Convert grayscale to RGB
             page->convert_gray_to_rgb();
-            
+
             pages.push_back(std::move(page));
         }
-        
+
         // Generate output based on number of pages
         if (num_files == 1) {
             // Single page: Generate both PNG and PDF
             const auto& page = pages[0];
-            
+
             // Generate PNG file
             std::string png_filename = final_output_prefix + ".png";
             FILE* png_file = fopen(png_filename.c_str(), "wb");
@@ -572,39 +572,39 @@ int main(int argc, const char* argv[]) {
             } else {
                 std::cerr << "Failed to create PNG file: " << png_filename << std::endl;
             }
-            
+
             // Generate PDF file
             std::string pdf_filename = final_output_prefix + ".pdf";
             pdfimg::PDFDocument pdf;
-            pdf.add_image_page(page->rgb_buffer().data(), page->width(), page->height(), 
+            pdf.add_image_page(page->rgb_buffer().data(), page->width(), page->height(),
                               page->width() * 3, true, compression);
-            
+
             if (pdf.save(pdf_filename)) {
                 std::cout << "Font grid saved to " << pdf_filename << std::endl;
             } else {
                 std::cerr << "Failed to save PDF file: " << pdf_filename << std::endl;
             }
-            
+
         } else {
             // Multiple pages: Generate only PDF with all pages
             std::string pdf_filename = final_output_prefix + ".pdf";
             pdfimg::PDFDocument pdf;
-            
+
             for (const auto& page : pages) {
-                pdf.add_image_page(page->rgb_buffer().data(), page->width(), page->height(), 
+                pdf.add_image_page(page->rgb_buffer().data(), page->width(), page->height(),
                                   page->width() * 3, true, compression);
             }
-            
+
             if (pdf.save(pdf_filename)) {
-                std::cout << "Multi-page font grid saved to " << pdf_filename << " (" 
+                std::cout << "Multi-page font grid saved to " << pdf_filename << " ("
                           << num_files << " pages)" << std::endl;
             } else {
                 std::cerr << "Failed to save PDF file: " << pdf_filename << std::endl;
             }
         }
-        
+
         return 0;
-        
+
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
