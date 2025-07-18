@@ -3,9 +3,10 @@ if (M_LIBRARY)
   target_link_libraries(genpng ${M_LIBRARY})
 endif (M_LIBRARY)
 
+# ProFont (relatively small and simple font)
 add_test(NAME ProFontGrid COMMAND genpng ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
 
-# Discover all .ttf files in dejavu/ttf and stix/ttf, creating test for each
+# DejaUu ttf files
 file(GLOB DEJAVU_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/dejavu/ttf/*.ttf")
 foreach(TTF ${DEJAVU_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
@@ -15,6 +16,7 @@ foreach(TTF ${DEJAVU_TTFS})
   )
 endforeach()
 
+# STIX ttf files
 file(GLOB STIX_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/stix/ttf/*.ttf")
 foreach(TTF ${STIX_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
@@ -24,6 +26,15 @@ foreach(TTF ${STIX_TTFS})
   )
 endforeach()
 
+# GNU Unifont ttf files (large character coverage)
+file(GLOB UNIFONT_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/unifont/*.ttf")
+foreach(TTF ${UNIFONT_TTFS})
+  get_filename_component(TTFNAME ${TTF} NAME_WE)
+  add_test(
+    NAME "${TTFNAME}"
+    COMMAND genpng ${TTF}
+  )
+endforeach()
 
 # Local Variables:
 # tab-width: 8
