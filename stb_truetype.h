@@ -1,15 +1,12 @@
-// stb_truetype.h - v1.26 - public domain
+// struetype.h - based on stb_truetype.h v1.26 - public domain
 // authored from 2009-2021 by Sean Barrett / RAD Game Tools
 //
-// =======================================================================
-//
-//    INCLUDES BUFFER SIZE SAFETY - USE ON UNTRUSTED FONT FILES
-//
-// This library includes bounds checking of buffer accesses to prevent
-// memory safety vulnerabilities when processing untrusted font files.
-// All APIs now require a buffer size parameter for safe operation.
-//
-// =======================================================================
+// ==========================================================================
+// NOTE:  Unlike the upstream stb_truetype.h, this library includes bounds
+// checking of buffer accesses to prevent memory safety vulnerabilities when
+// processing untrusted font files.  This comes at the cost of API
+// compatibility - a buffer size parameter is now required.
+// ==========================================================================
 //
 //   This library processes TrueType files:
 //        parse files
