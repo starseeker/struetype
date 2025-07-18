@@ -1,8 +1,21 @@
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/miniz")
+
+# Option to enable PDF image compression
+option(PDFIMG_ENABLE_COMPRESSION "Enable PDF image stream compression using miniz" OFF)
+
 add_executable(genpng genpng.c miniz/miniz.c)
 if (M_LIBRARY)
   target_link_libraries(genpng ${M_LIBRARY})
 endif (M_LIBRARY)
+
+# Add a compressed version of genpng if compression is enabled
+if(PDFIMG_ENABLE_COMPRESSION)
+  add_executable(genpng_compressed genpng.c miniz/miniz.c)
+  target_compile_definitions(genpng_compressed PRIVATE PDFIMG_ENABLE_COMPRESSION)
+  if (M_LIBRARY)
+    target_link_libraries(genpng_compressed ${M_LIBRARY})
+  endif (M_LIBRARY)
+endif()
 
 # ProFont (relatively small and simple font)
 add_test(NAME ProFontGrid COMMAND genpng ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)

@@ -2,7 +2,13 @@
  * pdfimg.h - Minimal header-only PDF writer for embedding raw (gray or RGB) image buffers as pages.
  *
  * Features strict PDF 1.4 compliance for compatibility with all PDF viewers including Evince.
- * Generates uncompressed image data; compression filters can be added if needed for smaller files.
+ * Supports optional Flate (zlib/deflate) compression of image streams using miniz.
+ *
+ * Compression Support:
+ * - Define PDFIMG_ENABLE_COMPRESSION to enable Flate compression using miniz
+ * - When enabled: compresses image data and adds /Filter /FlateDecode to PDF streams
+ * - When disabled: writes uncompressed image data (default behavior)
+ * - Uses pdfimg_compress() helper function that handles both modes transparently
  *
  * Derived from PDFGen (https://github.com/AndreRenaud/PDFGen)
  *
@@ -35,6 +41,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+
+#ifdef PDFIMG_ENABLE_COMPRESSION
+#include "miniz.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -116,33 +126,79 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
     // Calculate actual image data size
     int img_data_size = w * h * (is_rgb ? 3 : 1);
     
+    // Process image data and determine output size
+    int output_size;
+    uint8_t *output_data;
+    
+#ifdef PDFIMG_ENABLE_COMPRESSION
+    // Create temporary buffer for uncompressed image data
+    uint8_t *temp_buf = (uint8_t*)malloc(img_data_size);
+    if (!temp_buf) {
+        return 0; // Memory allocation failed
+    }
+    
+    // Copy image data to temporary buffer, row by row
+    for (int y = 0; y < h; ++y) {
+        memcpy(temp_buf + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
+    }
+    
+    // Compress the image data
+    mz_ulong compressed_size = mz_compressBound(img_data_size);
+    output_data = (uint8_t*)malloc(compressed_size);
+    if (!output_data) {
+        free(temp_buf);
+        return 0; // Memory allocation failed
+    }
+    
+    int result = mz_compress(output_data, &compressed_size, temp_buf, img_data_size);
+    free(temp_buf);
+    
+    if (result != MZ_OK) {
+        free(output_data);
+        return 0; // Compression failed
+    }
+    
+    output_size = compressed_size;
+#else
+    // No compression: create buffer with uncompressed data
+    output_data = (uint8_t*)malloc(img_data_size);
+    if (!output_data) {
+        return 0; // Memory allocation failed
+    }
+    
+    // Copy image data, row by row
+    for (int y = 0; y < h; ++y) {
+        memcpy(output_data + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
+    }
+    
+    output_size = img_data_size;
+#endif
+    
     // Add image object
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n", img_obj);
+    
+#ifdef PDFIMG_ENABLE_COMPRESSION
+    pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+        "/ColorSpace /Device%s /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n",
+        w, h, is_rgb ? "RGB" : "Gray", output_size);
+#else
     pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
         "/ColorSpace /Device%s /BitsPerComponent 8 /Length %d >>\nstream\n",
-        w, h, is_rgb ? "RGB" : "Gray", img_data_size);
-    
-    /* NOTE: Image compression could be added here for smaller file sizes.
-     * Options include:
-     * - /Filter /FlateDecode for lossless compression (requires zlib)
-     * - /Filter /DCTDecode for JPEG compression (requires JPEG encoder)
-     * - /Filter /CCITTFaxDecode for 1-bit images (black/white only)
-     * The stream data would need to be compressed before writing.
-     * Example: << ... /Filter /FlateDecode /Length compressed_size >>
-     */
+        w, h, is_rgb ? "RGB" : "Gray", output_size);
+#endif
     
     // Ensure buffer capacity for image data
-    if (pdf->len + img_data_size >= pdf->cap) {
-        pdf->cap = pdf->len + img_data_size + 1024;
+    if (pdf->len + output_size >= pdf->cap) {
+        pdf->cap = pdf->len + output_size + 1024;
         pdf->data = (uint8_t*)realloc(pdf->data, pdf->cap);
     }
     
-    // Copy buffer, row by row (stride might be >w)
-    for (int y = 0; y < h; ++y) {
-        memcpy(pdf->data + pdf->len, buf + y * stride, w * (is_rgb ? 3 : 1));
-        pdf->len += w * (is_rgb ? 3 : 1);
-    }
+    // Copy processed image data to PDF
+    memcpy(pdf->data + pdf->len, output_data, output_size);
+    pdf->len += output_size;
+    free(output_data);
+    
     pdfimg_append(pdf, "\nendstream\nendobj\n");
 
     // Add content stream to draw image
