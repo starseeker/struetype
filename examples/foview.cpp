@@ -46,6 +46,7 @@
 #include <libgen.h>
 #include <iostream>
 #include <string>
+#include <vector>
 #define STRUETYPE_IMPLEMENTATION
 #include "struetype.h"
 #include "svpng.h"
@@ -217,7 +218,52 @@ void render_footer(stt_fontinfo *mainInfo, unsigned char *buffer, int imageWidth
     }
 }
 
-/* Function to get default compression type based on what's available at compile time */
+/* Function to convert CompressionType to pdfimg_compression_type */
+static enum pdfimg_compression_type convert_compression_type(CompressionType compression) {
+    switch (compression) {
+        case COMPRESSION_FLATE:
+            return PDFIMG_COMPRESSION_FLATE;
+        case COMPRESSION_JPEG:
+            return PDFIMG_COMPRESSION_JPEG;
+        case COMPRESSION_NONE:
+        default:
+            return PDFIMG_COMPRESSION_NONE;
+    }
+}
+
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+/* Helper structure to collect JPEG bytes */
+struct JpegDataCollector {
+    std::vector<uint8_t> data;
+};
+
+/* Callback for TooJpeg to collect bytes */
+static JpegDataCollector* g_jpeg_collector = nullptr;
+
+void jpeg_output_callback(unsigned char byte) {
+    if (g_jpeg_collector) {
+        g_jpeg_collector->data.push_back(byte);
+    }
+}
+
+/* Function to compress image data using JPEG */
+static bool compress_image_jpeg(const uint8_t *image_data, int width, int height, 
+                               bool is_rgb, std::vector<uint8_t>& compressed_data) {
+    JpegDataCollector collector;
+    g_jpeg_collector = &collector;
+    
+    bool success = TooJpeg::writeJpeg(jpeg_output_callback, image_data, width, height, 
+                                     is_rgb, 85, false, nullptr);
+    
+    g_jpeg_collector = nullptr;
+    
+    if (success) {
+        compressed_data = std::move(collector.data);
+        return true;
+    }
+    return false;
+}
+#endif
 CompressionType get_default_compression() {
 #ifdef ENABLE_MINIZ_COMPRESSION
     return COMPRESSION_FLATE;
@@ -258,7 +304,11 @@ int main(int argc, const char *argv[])
                  get_default_compression() == COMPRESSION_FLATE ? "flate" :
                  get_default_compression() == COMPRESSION_JPEG ? "jpeg" : "none"))
             ("h,help", "Show this help message")
+            ("positional", "Positional arguments (for backward compatibility)", cxxopts::value<std::vector<std::string>>())
             ;
+        
+        // Allow positional arguments for backward compatibility
+        options.parse_positional({"positional"});
         
         // Parse command line arguments
         auto result = options.parse(argc, argv);
@@ -282,6 +332,9 @@ int main(int argc, const char *argv[])
             std::cout << "  foview -f arial.ttf -c flate             # Use Flate compression" << std::endl;
             std::cout << "  foview -f arial.ttf -c jpeg              # Use JPEG compression" << std::endl;
             std::cout << "  foview -f arial.ttf -c none              # Use no compression" << std::endl;
+            std::cout << "\nBackward compatibility:" << std::endl;
+            std::cout << "  foview font.ttf                          # Uses font.ttf (old format)" << std::endl;
+            std::cout << "  foview font.ttf output_name              # Uses font.ttf with output prefix (old format)" << std::endl;
             return 0;
         }
         
@@ -289,6 +342,19 @@ int main(int argc, const char *argv[])
         fontPathStr = result["font"].as<std::string>();
         outputPrefixStr = result.count("output") ? result["output"].as<std::string>() : "";
         std::string compressionStr = result["compression"].as<std::string>();
+        
+        // Handle backward compatibility with positional arguments (for tests)
+        if (result.count("positional")) {
+            const auto& positional = result["positional"].as<std::vector<std::string>>();
+            if (!positional.empty()) {
+                // If we have positional arguments, treat them as the old format
+                // foview [font_file] [output_prefix]
+                fontPathStr = positional[0];
+                if (positional.size() > 1) {
+                    outputPrefixStr = positional[1];
+                }
+            }
+        }
         
         // Parse compression type
         if (compressionStr == "flate") {
@@ -595,8 +661,26 @@ int main(int argc, const char *argv[])
         
         pdfimg_doc_t *pdf = pdfimg_create();
         if (pdf) {
-            pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
-                                img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+            enum pdfimg_compression_type pdf_compression = convert_compression_type(compression);
+            
+            if (compression == COMPRESSION_JPEG) {
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+                // Handle JPEG compression specially in C++ context
+                std::vector<uint8_t> jpeg_data;
+                if (compress_image_jpeg(img->rgbBuffer, img->width, img->height, true, jpeg_data)) {
+                    pdfimg_add_image_page_with_data(pdf, jpeg_data.data(), jpeg_data.size(), 
+                                                  img->width, img->height, 1, 72.0, " /Filter /DCTDecode");
+                } else {
+                    printf("JPEG compression failed, falling back to uncompressed\n");
+                    pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                   img->width * 3, 1, 72.0, PDFIMG_COMPRESSION_NONE);
+                }
+#endif
+            } else {
+                pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                               img->width * 3, 1, 72.0, pdf_compression);
+            }
+            
             if (pdfimg_save(pdf, pdfFilename)) {
                 printf("Font grid saved to %s\n", pdfFilename);
             } else {
@@ -612,11 +696,30 @@ int main(int argc, const char *argv[])
         
         pdfimg_doc_t *pdf = pdfimg_create();
         if (pdf) {
+            enum pdfimg_compression_type pdf_compression = convert_compression_type(compression);
+            
             for (int i = 0; i < numFiles; i++) {
                 ImageData *img = &images[i];
-                pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
-                                    img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+                
+                if (compression == COMPRESSION_JPEG) {
+#ifdef ENABLE_TOOJPEG_COMPRESSION
+                    // Handle JPEG compression specially in C++ context
+                    std::vector<uint8_t> jpeg_data;
+                    if (compress_image_jpeg(img->rgbBuffer, img->width, img->height, true, jpeg_data)) {
+                        pdfimg_add_image_page_with_data(pdf, jpeg_data.data(), jpeg_data.size(), 
+                                                      img->width, img->height, 1, 72.0, " /Filter /DCTDecode");
+                    } else {
+                        printf("JPEG compression failed for page %d, falling back to uncompressed\n", i + 1);
+                        pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                       img->width * 3, 1, 72.0, PDFIMG_COMPRESSION_NONE);
+                    }
+#endif
+                } else {
+                    pdfimg_add_image_page_compressed(pdf, img->rgbBuffer, img->width, img->height, 
+                                                   img->width * 3, 1, 72.0, pdf_compression);
+                }
             }
+            
             if (pdfimg_save(pdf, pdfFilename)) {
                 printf("Multi-page font grid saved to %s (%d pages)\n", pdfFilename, numFiles);
             } else {
