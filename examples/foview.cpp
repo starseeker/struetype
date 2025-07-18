@@ -48,6 +48,8 @@
 #include "struetype.h"
 #include "svpng.h"
 #include "pdfimg.h"
+#include "toojpeg.h"
+#include "cxxopts.hpp"
 
 /* Embedded ProFont.ttf data for footer rendering */
 #include "profont_embedded.h"

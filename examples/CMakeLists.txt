@@ -1,6 +1,6 @@
 include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/miniz"
-  "${CMAKE_CURRENT_SOURCE_DIR}/toojpeg.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/toojpeg"
   )
 add_executable(foview foview.cpp miniz/miniz.c toojpeg/toojpeg.cpp)
 if (M_LIBRARY)
