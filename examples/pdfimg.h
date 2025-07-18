@@ -2,7 +2,13 @@
  * pdfimg.h - Minimal header-only PDF writer for embedding raw (gray or RGB) image buffers as pages.
  *
  * Features strict PDF 1.4 compliance for compatibility with all PDF viewers including Evince.
- * Generates uncompressed image data; compression filters can be added if needed for smaller files.
+ * Supports optional Flate (zlib/deflate) compression of image streams using miniz.
+ *
+ * Compression Support:
+ * - Define PDFIMG_ENABLE_COMPRESSION to enable Flate compression using miniz
+ * - When enabled: compresses image data and adds /Filter /FlateDecode to PDF streams
+ * - When disabled: writes uncompressed image data (default behavior)
+ * - Uses pdfimg_compress() helper function that handles both modes transparently
  *
  * Derived from PDFGen (https://github.com/AndreRenaud/PDFGen)
  *
@@ -151,9 +157,63 @@ static inline int pdfimg_add_image_page_with_data(pdfimg_doc_t *pdf,
     int content_obj = pdf->next_obj_id++;
     int page_obj = pdf->next_obj_id++;
     
+    // Process image data and determine output size
+    int output_size;
+    uint8_t *output_data;
+    
+#ifdef PDFIMG_ENABLE_COMPRESSION
+    // Create temporary buffer for uncompressed image data
+    uint8_t *temp_buf = (uint8_t*)malloc(img_data_size);
+    if (!temp_buf) {
+        return 0; // Memory allocation failed
+    }
+    
+    // Copy image data to temporary buffer, row by row
+    for (int y = 0; y < h; ++y) {
+        memcpy(temp_buf + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
+    }
+    
+    // Compress the image data
+    mz_ulong compressed_size = mz_compressBound(img_data_size);
+    output_data = (uint8_t*)malloc(compressed_size);
+    if (!output_data) {
+        free(temp_buf);
+        return 0; // Memory allocation failed
+    }
+    
+    int result = mz_compress(output_data, &compressed_size, temp_buf, img_data_size);
+    free(temp_buf);
+    
+    if (result != MZ_OK) {
+        free(output_data);
+        return 0; // Compression failed
+    }
+    
+    output_size = compressed_size;
+#else
+    // No compression: create buffer with uncompressed data
+    output_data = (uint8_t*)malloc(img_data_size);
+    if (!output_data) {
+        return 0; // Memory allocation failed
+    }
+    
+    // Copy image data, row by row
+    for (int y = 0; y < h; ++y) {
+        memcpy(output_data + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
+    }
+    
+    output_size = img_data_size;
+#endif
+    
     // Add image object
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n", img_obj);
+    
+#ifdef PDFIMG_ENABLE_COMPRESSION
+    pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+        "/ColorSpace /Device%s /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n",
+        w, h, is_rgb ? "RGB" : "Gray", output_size);
+#else
     pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
         "/ColorSpace /Device%s /BitsPerComponent 8%s /Length %zu >>\nstream\n",
         w, h, is_rgb ? "RGB" : "Gray", filter_name, image_data_size);
