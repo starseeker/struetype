@@ -1,4 +1,5 @@
-add_executable(genpng genpng.c)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/miniz")
+add_executable(genpng genpng.c miniz/miniz.c)
 if (M_LIBRARY)
   target_link_libraries(genpng ${M_LIBRARY})
 endif (M_LIBRARY)
