@@ -91,7 +91,7 @@
 //
 //   Include this file in whatever places need to refer to it. In ONE C/C++
 //   file, write:
-//      #define STB_TRUETYPE_IMPLEMENTATION
+//      #define STRUETYPE_IMPLEMENTATION
 //   before the #include of this file. This expands out the actual
 //   implementation into that C/C++ file.
 //
@@ -273,7 +273,7 @@
 //  Incomplete text-in-3d-api example, which draws quads properly aligned to be lossless.
 //  See "tests/truetype_demo_win32.c" for a complete version.
 #if 0
-#define STB_TRUETYPE_IMPLEMENTATION  // force following include to generate implementation
+#define STRUETYPE_IMPLEMENTATION  // force following include to generate implementation
 #include "stb_truetype.h"
 
 unsigned char ttf_buffer[1<<20];
@@ -324,7 +324,7 @@ void my_stt_print(float x, float y, char *text)
 //
 #if 0
 #include <stdio.h>
-#define STB_TRUETYPE_IMPLEMENTATION  // force following include to generate implementation
+#define STRUETYPE_IMPLEMENTATION  // force following include to generate implementation
 #include "stb_truetype.h"
 
 char ttf_buffer[1<<25];
@@ -420,7 +420,7 @@ int main(int arg, char **argv)
 ////   of C library functions used by stb_truetype, e.g. if you don't
 ////   link with the C runtime library.
 
-#ifdef STB_TRUETYPE_IMPLEMENTATION
+#ifdef STRUETYPE_IMPLEMENTATION
    // #define your own (u)stt_int8/16/32 before including to override this
    #ifndef stt_uint8
    typedef unsigned char   stt_uint8;
@@ -494,8 +494,8 @@ int main(int arg, char **argv)
 ////
 ////
 
-#ifndef __STB_INCLUDE_STB_TRUETYPE_H__
-#define __STB_INCLUDE_STB_TRUETYPE_H__
+#ifndef __INCLUDE_STRUETYPE_H__
+#define __INCLUDE_STRUETYPE_H__
 
 #ifdef STT_STATIC
 #define STT_DEF static
@@ -1094,7 +1094,7 @@ enum { // languageID for STT_PLATFORM_ID_MAC
 }
 #endif
 
-#endif // __STB_INCLUDE_STB_TRUETYPE_H__
+#endif //__INCLUDE_STRUETYPE_H__
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
@@ -1103,7 +1103,7 @@ enum { // languageID for STT_PLATFORM_ID_MAC
 ////
 ////
 
-#ifdef STB_TRUETYPE_IMPLEMENTATION
+#ifdef STRUETYPE_IMPLEMENTATION
 
 #ifndef STT_MAX_OVERSAMPLE
 #define STT_MAX_OVERSAMPLE   8
@@ -5079,7 +5079,7 @@ STT_DEF int stt_CompareUTF8toUTF16_bigendian(const char *s1, int len1, const cha
 #pragma GCC diagnostic pop
 #endif
 
-#endif // STB_TRUETYPE_IMPLEMENTATION
+#endif // STRUETYPE_IMPLEMENTATION
 
 
 // FULL VERSION HISTORY

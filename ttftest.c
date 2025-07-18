@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "stb_truetype.h"
+#define STRUETYPE_IMPLEMENTATION
+#include "struetype.h"
 
 int main(int argc, const char *argv[])
 {
