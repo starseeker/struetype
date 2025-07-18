@@ -1,5 +1,5 @@
 /*
- * genpng.c - Generate PNG images showing all available glyphs in a font
+ * genpng.c - Generate PNG and PDF images showing all available glyphs in a font
  *
  * This example demonstrates how to:
  * 1. Load a TrueType font using struetype.h
@@ -9,8 +9,10 @@
  * 5. Center each glyph visually in its grid cell using font metrics
  * 6. Render characters darker on light background using simple subtraction
  * 7. Convert grayscale bitmap to RGB format
- * 8. Automatically split output into multiple PNG files if needed to stay within size limits
- * 9. Smart output naming: single file as .png, multiple files as <root>-01.png, etc.
+ * 8. Generate appropriate output based on glyph count:
+ *    - Single page: Both PNG and PDF output
+ *    - Multiple pages: PDF-only output with all pages
+ * 9. Smart output naming: single file as .png/.pdf, multiple as .pdf only
  * 10. Add footer with font name and Unicode range using embedded ProFont
  *
  * Key rendering features:
@@ -23,17 +25,19 @@
  * - Adaptive sizing: single-page output sized to fit content, multi-page uses uniform dimensions
  * - Footer displays font name and Unicode range using embedded ProFont
  *
- * Enhanced sizing logic:
- * - Single-page output: Image sized just large enough to fit grid and footer (may be smaller than max)
- * - Multi-page output: All pages use uniform 1500x2000 pixel dimensions (including last page)
- * - Smart output naming: single image without suffix, multiple with zero-padded numbers
+ * Enhanced output logic:
+ * - Single-page output: Generates both PNG and PDF files (e.g., "output.png" and "output.pdf")
+ * - Multi-page output: Generates only PDF file with all pages (e.g., "output.pdf")
+ * - Uses pdfimg.h minimal PDF writer for PDF backend
  * - Footer strip below grid showing font name and Unicode range
  * - Footer always rendered using embedded ProFont (always available, never skipped)
  * - Print-ready 1500x2000 pixel output size for multi-page (5" x 6.67" at 300dpi)
  *
  * Usage: genpng [font_file] [output_prefix]
  * Defaults: genpng profont/ProFont.ttf fontgrid
- * Output: fontgrid.png (single) or fontgrid-01.png, fontgrid-02.png, etc. (multiple)
+ * Output: 
+ *   - Single page: fontgrid.png and fontgrid.pdf
+ *   - Multiple pages: fontgrid.pdf only
  */
 
 #include <stdio.h>
@@ -47,6 +51,17 @@
 
 /* Embedded ProFont.ttf data for footer rendering */
 #include "profont_embedded.h"
+
+/* Structure to hold image data for later output */
+typedef struct {
+    unsigned char *grayBuffer;
+    unsigned char *rgbBuffer;
+    int width;
+    int height;
+    int startCodepoint;
+    int endCodepoint;
+    char fontName[256];
+} ImageData;
 
 /* Function to extract base name from font file path and create output prefix */
 void get_output_prefix(const char *fontPath, const char *userPrefix, char *outputPrefix, size_t bufferSize) {
@@ -191,6 +206,24 @@ void render_footer(stt_fontinfo *mainInfo, unsigned char *buffer, int imageWidth
 
 int main(int argc, const char *argv[])
 {
+    /* Check for help request */
+    if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+        printf("Usage: %s [font_file] [output_prefix]\n", argv[0]);
+        printf("\nGenerate PNG and/or PDF images showing all available glyphs in a font.\n");
+        printf("\nArguments:\n");
+        printf("  font_file     Path to TrueType font file (default: profont/ProFont.ttf)\n");
+        printf("  output_prefix Output file prefix (default: derived from font filename)\n");
+        printf("\nOutput behavior:\n");
+        printf("  Single page:  Creates both <prefix>.png and <prefix>.pdf\n");
+        printf("  Multiple pages: Creates only <prefix>.pdf with all pages\n");
+        printf("\nExamples:\n");
+        printf("  %s                                    # Uses default font, creates ProFont.png + ProFont.pdf\n", argv[0]);
+        printf("  %s arial.ttf                         # Creates arial.png + arial.pdf (if single page)\n", argv[0]);
+        printf("  %s arial.ttf myfont                  # Creates myfont.png + myfont.pdf (if single page)\n", argv[0]);
+        printf("  %s large_font.ttf                    # Creates large_font.pdf only (if multiple pages)\n", argv[0]);
+        return 0;
+    }
+
     /* Parse command line arguments */
     const char *fontPath = (argc > 1) ? argv[1] : "profont/ProFont.ttf";
     const char *outputPrefix = (argc > 2) ? argv[2] : NULL;
@@ -290,7 +323,16 @@ int main(int argc, const char *argv[])
     /* Calculate baseline position to center font vertically in cell */
     float baseline = (cellHeight / 2.0f) + ((ascent - descent) / 2.0f * scale) - (ascent * scale);
 
-    /* Generate each file */
+    /* Allocate array to store image data for all pages */
+    ImageData *images = malloc(numFiles * sizeof(ImageData));
+    if (!images) {
+        printf("Failed to allocate memory for image data\n");
+        free(availableGlyphs);
+        free(fontBuffer);
+        exit(-1);
+    }
+
+    /* Generate image data for each file */
     for (int fileIndex = 0; fileIndex < numFiles; fileIndex++) {
         int startGlyph = fileIndex * maxGlyphsPerFile;
         int endGlyph = startGlyph + maxGlyphsPerFile;
@@ -422,36 +464,77 @@ int main(int argc, const char *argv[])
             rgbBuffer[i * 3 + 2] = gray;
         }
 
-        /* Create output filename with smart naming */
-        char outputFilename[512];
-        if (numFiles == 1) {
-            /* Single file: no numeric suffix */
-            snprintf(outputFilename, sizeof(outputFilename), "%s.png", finalOutputPrefix);
-        } else {
-            /* Multiple files: zero-padded numbering */
-            snprintf(outputFilename, sizeof(outputFilename), "%s-%02d.png", finalOutputPrefix, fileIndex + 1);
-        }
-
-        /* Write PNG file */
-        FILE *outFile = fopen(outputFilename, "wb");
-        if (!outFile) {
-            printf("Failed to create output file: %s\n", outputFilename);
-            free(rgbBuffer);
-            free(grayBuffer);
-            free(availableGlyphs);
-            free(fontBuffer);
-            exit(-1);
-        }
-
-        svpng(outFile, imageWidth, imageHeight, rgbBuffer, 0);
-        fclose(outFile);
-
-        printf("Font grid saved to %s\n", outputFilename);
-
-        /* Cleanup for this file */
-        free(rgbBuffer);
-        free(grayBuffer);
+        /* Store image data for later output */
+        images[fileIndex].grayBuffer = grayBuffer;
+        images[fileIndex].rgbBuffer = rgbBuffer;
+        images[fileIndex].width = imageWidth;
+        images[fileIndex].height = imageHeight;
+        images[fileIndex].startCodepoint = startCodepoint;
+        images[fileIndex].endCodepoint = endCodepoint;
+        strcpy(images[fileIndex].fontName, fontName);
     }
+
+    /* Now generate output based on number of pages */
+    if (numFiles == 1) {
+        /* Single page: Generate both PNG and PDF */
+        ImageData *img = &images[0];
+        
+        /* Generate PNG file */
+        char pngFilename[512];
+        snprintf(pngFilename, sizeof(pngFilename), "%s.png", finalOutputPrefix);
+        
+        FILE *pngFile = fopen(pngFilename, "wb");
+        if (!pngFile) {
+            printf("Failed to create PNG file: %s\n", pngFilename);
+        } else {
+            svpng(pngFile, img->width, img->height, img->rgbBuffer, 0);
+            fclose(pngFile);
+            printf("Font grid saved to %s\n", pngFilename);
+        }
+        
+        /* Generate PDF file */
+        char pdfFilename[512];
+        snprintf(pdfFilename, sizeof(pdfFilename), "%s.pdf", finalOutputPrefix);
+        
+        pdfimg_doc_t *pdf = pdfimg_create();
+        if (pdf) {
+            pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
+                                img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+            if (pdfimg_save(pdf, pdfFilename)) {
+                printf("Font grid saved to %s\n", pdfFilename);
+            } else {
+                printf("Failed to save PDF file: %s\n", pdfFilename);
+            }
+            pdfimg_free(pdf);
+        }
+        
+    } else {
+        /* Multiple pages: Generate only PDF with all pages */
+        char pdfFilename[512];
+        snprintf(pdfFilename, sizeof(pdfFilename), "%s.pdf", finalOutputPrefix);
+        
+        pdfimg_doc_t *pdf = pdfimg_create();
+        if (pdf) {
+            for (int i = 0; i < numFiles; i++) {
+                ImageData *img = &images[i];
+                pdfimg_add_image_page(pdf, img->rgbBuffer, img->width, img->height, 
+                                    img->width * 3, 1, 72.0); /* 72 DPI for screen viewing */
+            }
+            if (pdfimg_save(pdf, pdfFilename)) {
+                printf("Multi-page font grid saved to %s (%d pages)\n", pdfFilename, numFiles);
+            } else {
+                printf("Failed to save PDF file: %s\n", pdfFilename);
+            }
+            pdfimg_free(pdf);
+        }
+    }
+
+    /* Cleanup image data */
+    for (int i = 0; i < numFiles; i++) {
+        free(images[i].grayBuffer);
+        free(images[i].rgbBuffer);
+    }
+    free(images);
 
     /* Final cleanup */
     free(availableGlyphs);
