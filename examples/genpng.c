@@ -1,54 +1,112 @@
 /*
- * genpng.c - Generate a PNG image showing all printable ASCII characters
+ * genpng.c - Generate PNG images showing all available glyphs in a font
  *
  * This example demonstrates how to:
  * 1. Load a TrueType font using struetype.h
- * 2. Render all printable ASCII characters (32-126) using stt_GetCodepointBitmap
- * 3. Arrange glyphs in a grid layout with optional grid lines
- * 4. Center each glyph visually in its grid cell using font metrics
- * 5. Render characters darker on light background using simple subtraction
- * 6. Convert grayscale bitmap to RGB format
- * 7. Save the result as a PNG file using svpng.h
+ * 2. Scan the entire Unicode range (0-0x10FFFF) to find all available glyphs
+ * 3. Render ALL glyphs that exist in the font using stt_GetCodepointBitmap
+ * 4. Arrange glyphs in a grid layout with optional grid lines
+ * 5. Center each glyph visually in its grid cell using font metrics
+ * 6. Render characters darker on light background using simple subtraction
+ * 7. Convert grayscale bitmap to RGB format
+ * 8. Automatically split output into multiple PNG files if needed to stay within 1024x1024 limit
+ * 9. Save results with numbered suffixes (e.g., ProFont-01.png, ProFont-02.png, ...)
  *
  * Key rendering features:
  * - Uses font ascent/descent metrics to calculate proper baseline positioning
  * - Centers glyphs horizontally and vertically for visual consistency
  * - Ignores xOffset/yOffset for cleaner visual centering
  * - Simple subtraction blending for crisp, dark text on light background
+ * - Scans entire Unicode range using stt_FindGlyphIndex to find available glyphs
+ * - Automatically creates multiple files when needed, keeping 1024x1024 size limit
  *
- * Usage: genpng [font_file] [output_file]
- * Defaults: genpng profont/ProFont.ttf fontgrid.png
+ * Usage: genpng [font_file] [output_prefix]
+ * Defaults: genpng profont/ProFont.ttf fontgrid
+ * Output: fontgrid-01.png, fontgrid-02.png, etc. (or ProFont-01.png if using default font)
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libgen.h>
 #define STRUETYPE_IMPLEMENTATION
 #include "struetype.h"
 #include "svpng.h"
+
+/* Function to extract base name from font file path and create output prefix */
+void get_output_prefix(const char *fontPath, const char *userPrefix, char *outputPrefix, size_t bufferSize) {
+    if (userPrefix) {
+        snprintf(outputPrefix, bufferSize, "%s", userPrefix);
+    } else {
+        /* Extract filename without extension from font path */
+        char *fontPathCopy = strdup(fontPath);
+        char *baseName = basename(fontPathCopy);
+        char *dot = strrchr(baseName, '.');
+        if (dot) *dot = '\0';  /* Remove extension */
+        snprintf(outputPrefix, bufferSize, "%s", baseName);
+        free(fontPathCopy);
+    }
+}
+
+/* Function to collect all available glyphs in the font */
+int collect_available_glyphs(stt_fontinfo *info, int **glyphs) {
+    int count = 0;
+    int capacity = 1000; /* Start with reasonable capacity */
+    int *glyph_list = malloc(capacity * sizeof(int));
+    
+    if (!glyph_list) {
+        printf("Failed to allocate memory for glyph collection\n");
+        return 0;
+    }
+    
+    /* Scan the entire Unicode range */
+    for (int codepoint = 0; codepoint <= 0x10FFFF; codepoint++) {
+        if (stt_FindGlyphIndex(info, codepoint) != 0) {
+            /* Found a glyph for this codepoint */
+            if (count >= capacity) {
+                capacity *= 2;
+                int *new_list = realloc(glyph_list, capacity * sizeof(int));
+                if (!new_list) {
+                    printf("Failed to reallocate memory for glyph collection\n");
+                    free(glyph_list);
+                    return 0;
+                }
+                glyph_list = new_list;
+            }
+            glyph_list[count++] = codepoint;
+        }
+    }
+    
+    *glyphs = glyph_list;
+    printf("Found %d glyphs in font\n", count);
+    return count;
+}
 
 int main(int argc, const char *argv[])
 {
     /* Parse command line arguments */
     const char *fontPath = (argc > 1) ? argv[1] : "profont/ProFont.ttf";
-    const char *outputPath = (argc > 2) ? argv[2] : "fontgrid.png";
+    const char *outputPrefix = (argc > 2) ? argv[2] : NULL;
 
-    /* Grid configuration - renders ASCII 32-126 (95 printable characters) */
-    const int gridCols = 16;   /* 16 columns */
-    const int gridRows = 6;    /* 6 rows (16*6 = 96 cells, need 95) */
-    const int cellWidth = 48;  /* Width of each cell in pixels */
-    const int cellHeight = 48; /* Height of each cell in pixels */
-    const int fontSize = 24;   /* Font size in pixels */
+    /* Configuration constants */
+    const int cellWidth = 48;    /* Width of each cell in pixels */
+    const int cellHeight = 48;   /* Height of each cell in pixels */
+    const int fontSize = 24;     /* Font size in pixels */
     const int drawGridLines = 1; /* Draw faint grid lines */
+    const int maxImageSize = 1024; /* Maximum image dimension */
+    
+    /* Calculate grid dimensions for maximum image size */
+    const int maxGridCols = maxImageSize / cellWidth;   /* 21 columns */
+    const int maxGridRows = maxImageSize / cellHeight;  /* 21 rows */
+    const int maxGlyphsPerFile = maxGridCols * maxGridRows; /* 441 glyphs per file */
 
-    /* Calculate image dimensions */
-    const int imageWidth = gridCols * cellWidth;
-    const int imageHeight = gridRows * cellHeight;
+    /* Get output prefix */
+    char finalOutputPrefix[256];
+    get_output_prefix(fontPath, outputPrefix, finalOutputPrefix, sizeof(finalOutputPrefix));
 
-    printf("Generating font grid: %dx%d pixels, %dx%d cells\n",
-           imageWidth, imageHeight, gridCols, gridRows);
     printf("Font: %s\n", fontPath);
-    printf("Output: %s\n", outputPath);
+    printf("Output prefix: %s\n", finalOutputPrefix);
+    printf("Max glyphs per file: %d (grid: %dx%d)\n", maxGlyphsPerFile, maxGridCols, maxGridRows);
 
     /* Load font file */
     FILE *fontFile = fopen(fontPath, "rb");
@@ -73,6 +131,19 @@ int main(int argc, const char *argv[])
         exit(-1);
     }
 
+    /* Collect all available glyphs */
+    int *availableGlyphs = NULL;
+    int totalGlyphs = collect_available_glyphs(&info, &availableGlyphs);
+    if (totalGlyphs == 0) {
+        printf("No glyphs found in font\n");
+        free(fontBuffer);
+        exit(-1);
+    }
+
+    /* Calculate number of files needed */
+    int numFiles = (totalGlyphs + maxGlyphsPerFile - 1) / maxGlyphsPerFile;
+    printf("Total glyphs: %d, will create %d file(s)\n", totalGlyphs, numFiles);
+
     /* Calculate font scaling - converts font units to pixels */
     float scale = stt_ScaleForPixelHeight(&info, fontSize);
 
@@ -80,127 +151,151 @@ int main(int argc, const char *argv[])
     int ascent, descent, lineGap;
     stt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
     
-    /* Calculate baseline position to center font vertically in cell
-     * Formula: cellHeight/2 + (ascent-descent)/2*scale - ascent*scale
-     * This positions the baseline so the font appears visually centered */
+    /* Calculate baseline position to center font vertically in cell */
     float baseline = (cellHeight / 2.0f) + ((ascent - descent) / 2.0f * scale) - (ascent * scale);
 
-    /* Create grayscale image buffer (8-bit per pixel) */
-    unsigned char *grayBuffer = calloc(imageWidth * imageHeight, sizeof(unsigned char));
-    if (!grayBuffer) {
-        printf("Failed to allocate image buffer\n");
-        free(fontBuffer);
-        exit(-1);
-    }
+    /* Generate each file */
+    for (int fileIndex = 0; fileIndex < numFiles; fileIndex++) {
+        int startGlyph = fileIndex * maxGlyphsPerFile;
+        int endGlyph = startGlyph + maxGlyphsPerFile;
+        if (endGlyph > totalGlyphs) endGlyph = totalGlyphs;
+        
+        int glyphsInFile = endGlyph - startGlyph;
+        
+        /* Calculate grid dimensions for this file */
+        int gridCols = (glyphsInFile > maxGridCols) ? maxGridCols : 
+                       (glyphsInFile <= maxGridCols) ? glyphsInFile : maxGridCols;
+        int gridRows = (glyphsInFile + gridCols - 1) / gridCols;
+        
+        /* Calculate actual image dimensions */
+        int imageWidth = gridCols * cellWidth;
+        int imageHeight = gridRows * cellHeight;
+        
+        printf("File %d: %dx%d pixels, %dx%d cells, %d glyphs\n",
+               fileIndex + 1, imageWidth, imageHeight, gridCols, gridRows, glyphsInFile);
 
-    /* Fill with light gray background (240 = light gray) */
-    memset(grayBuffer, 240, imageWidth * imageHeight);
+        /* Create grayscale image buffer */
+        unsigned char *grayBuffer = calloc(imageWidth * imageHeight, sizeof(unsigned char));
+        if (!grayBuffer) {
+            printf("Failed to allocate image buffer\n");
+            free(availableGlyphs);
+            free(fontBuffer);
+            exit(-1);
+        }
 
-    /* Render each printable ASCII character (32=' ' to 126='~') */
-    for (int i = 0; i < 95; i++) {
-        int codepoint = 32 + i;  /* ASCII 32-126 */
-        int row = i / gridCols;  /* Grid row (0-5) */
-        int col = i % gridCols;  /* Grid column (0-15) */
+        /* Fill with light gray background */
+        memset(grayBuffer, 240, imageWidth * imageHeight);
 
-        /* Get glyph bitmap using struetype functions */
-        int glyphWidth, glyphHeight, xOffset, yOffset;
-        unsigned char *glyphBitmap = stt_GetCodepointBitmap(&info, scale, scale,
-                                                             codepoint, &glyphWidth, &glyphHeight,
-                                                             &xOffset, &yOffset);
+        /* Render glyphs for this file */
+        for (int i = 0; i < glyphsInFile; i++) {
+            int codepoint = availableGlyphs[startGlyph + i];
+            int row = i / gridCols;
+            int col = i % gridCols;
 
-        if (glyphBitmap) {
-            /* Calculate glyph position using baseline-centered approach
-             * - Center horizontally in cell (ignore xOffset for visual centering)
-             * - Position vertically using calculated baseline (ignore yOffset) */
-            int cellX = col * cellWidth;
-            int cellY = row * cellHeight;
-            int glyphX = cellX + (cellWidth - glyphWidth) / 2;
-            int glyphY = cellY + (int)baseline;
+            /* Get glyph bitmap */
+            int glyphWidth, glyphHeight, xOffset, yOffset;
+            unsigned char *glyphBitmap = stt_GetCodepointBitmap(&info, scale, scale,
+                                                                 codepoint, &glyphWidth, &glyphHeight,
+                                                                 &xOffset, &yOffset);
 
-            /* Copy glyph bitmap to main image buffer */
-            for (int gy = 0; gy < glyphHeight; gy++) {
-                for (int gx = 0; gx < glyphWidth; gx++) {
-                    int imageX = glyphX + gx;
-                    int imageY = glyphY + gy;
+            if (glyphBitmap) {
+                /* Calculate glyph position using baseline-centered approach */
+                int cellX = col * cellWidth;
+                int cellY = row * cellHeight;
+                int glyphX = cellX + (cellWidth - glyphWidth) / 2;
+                int glyphY = cellY + (int)baseline;
 
-                    /* Check bounds to prevent buffer overflow */
-                    if (imageX >= 0 && imageX < imageWidth &&
-                        imageY >= 0 && imageY < imageHeight) {
-                        unsigned char glyphPixel = glyphBitmap[gy * glyphWidth + gx];
-                        
-                        /* Render characters darker by subtracting glyph pixel from background
-                         * This creates darker text on light background, clamped at 0 */
-                        int bgPixel = grayBuffer[imageY * imageWidth + imageX];
-                        int darkened = bgPixel - glyphPixel;
-                        if (darkened < 0) darkened = 0;
-                        grayBuffer[imageY * imageWidth + imageX] = darkened;
+                /* Copy glyph bitmap to main image buffer */
+                for (int gy = 0; gy < glyphHeight; gy++) {
+                    for (int gx = 0; gx < glyphWidth; gx++) {
+                        int imageX = glyphX + gx;
+                        int imageY = glyphY + gy;
+
+                        /* Check bounds */
+                        if (imageX >= 0 && imageX < imageWidth &&
+                            imageY >= 0 && imageY < imageHeight) {
+                            unsigned char glyphPixel = glyphBitmap[gy * glyphWidth + gx];
+                            
+                            /* Render characters darker */
+                            int bgPixel = grayBuffer[imageY * imageWidth + imageX];
+                            int darkened = bgPixel - glyphPixel;
+                            if (darkened < 0) darkened = 0;
+                            grayBuffer[imageY * imageWidth + imageX] = darkened;
+                        }
+                    }
+                }
+
+                /* Free the glyph bitmap */
+                stt_FreeBitmap(glyphBitmap, NULL);
+            }
+        }
+
+        /* Draw grid lines if enabled */
+        if (drawGridLines) {
+            /* Vertical grid lines */
+            for (int x = 0; x <= gridCols; x++) {
+                int lineX = x * cellWidth;
+                if (lineX < imageWidth) {
+                    for (int y = 0; y < imageHeight; y++) {
+                        grayBuffer[y * imageWidth + lineX] = 200;
                     }
                 }
             }
-
-            /* Free the glyph bitmap allocated by struetype */
-            stt_FreeBitmap(glyphBitmap, NULL);
-        }
-    }
-
-    /* Draw faint grid lines if enabled */
-    if (drawGridLines) {
-        /* Vertical grid lines */
-        for (int x = 0; x <= gridCols; x++) {
-            int lineX = x * cellWidth;
-            if (lineX < imageWidth) {
-                for (int y = 0; y < imageHeight; y++) {
-                    grayBuffer[y * imageWidth + lineX] = 200; /* Light gray */
+            /* Horizontal grid lines */
+            for (int y = 0; y <= gridRows; y++) {
+                int lineY = y * cellHeight;
+                if (lineY < imageHeight) {
+                    for (int x = 0; x < imageWidth; x++) {
+                        grayBuffer[lineY * imageWidth + x] = 200;
+                    }
                 }
             }
         }
-        /* Horizontal grid lines */
-        for (int y = 0; y <= gridRows; y++) {
-            int lineY = y * cellHeight;
-            if (lineY < imageHeight) {
-                for (int x = 0; x < imageWidth; x++) {
-                    grayBuffer[lineY * imageWidth + x] = 200; /* Light gray */
-                }
-            }
+
+        /* Convert grayscale to RGB */
+        unsigned char *rgbBuffer = malloc(imageWidth * imageHeight * 3);
+        if (!rgbBuffer) {
+            printf("Failed to allocate RGB buffer\n");
+            free(grayBuffer);
+            free(availableGlyphs);
+            free(fontBuffer);
+            exit(-1);
         }
-    }
 
-    /* Convert grayscale to RGB for PNG output (svpng expects RGB format) */
-    unsigned char *rgbBuffer = malloc(imageWidth * imageHeight * 3);
-    if (!rgbBuffer) {
-        printf("Failed to allocate RGB buffer\n");
-        free(grayBuffer);
-        free(fontBuffer);
-        exit(-1);
-    }
+        for (int i = 0; i < imageWidth * imageHeight; i++) {
+            unsigned char gray = grayBuffer[i];
+            rgbBuffer[i * 3] = gray;
+            rgbBuffer[i * 3 + 1] = gray;
+            rgbBuffer[i * 3 + 2] = gray;
+        }
 
-    /* Convert each grayscale pixel to RGB by duplicating the gray value */
-    for (int i = 0; i < imageWidth * imageHeight; i++) {
-        unsigned char gray = grayBuffer[i];
-        rgbBuffer[i * 3] = gray;     /* Red channel */
-        rgbBuffer[i * 3 + 1] = gray; /* Green channel */
-        rgbBuffer[i * 3 + 2] = gray; /* Blue channel */
-    }
+        /* Create output filename with zero-padded number */
+        char outputFilename[512];
+        snprintf(outputFilename, sizeof(outputFilename), "%s-%02d.png", finalOutputPrefix, fileIndex + 1);
 
-    /* Write PNG file using svpng.h */
-    FILE *outFile = fopen(outputPath, "wb");
-    if (!outFile) {
-        printf("Failed to create output file: %s\n", outputPath);
+        /* Write PNG file */
+        FILE *outFile = fopen(outputFilename, "wb");
+        if (!outFile) {
+            printf("Failed to create output file: %s\n", outputFilename);
+            free(rgbBuffer);
+            free(grayBuffer);
+            free(availableGlyphs);
+            free(fontBuffer);
+            exit(-1);
+        }
+
+        svpng(outFile, imageWidth, imageHeight, rgbBuffer, 0);
+        fclose(outFile);
+
+        printf("Font grid saved to %s\n", outputFilename);
+
+        /* Cleanup for this file */
         free(rgbBuffer);
         free(grayBuffer);
-        free(fontBuffer);
-        exit(-1);
     }
 
-    /* svpng(file, width, height, rgb_data, alpha_channel) */
-    svpng(outFile, imageWidth, imageHeight, rgbBuffer, 0);
-    fclose(outFile);
-
-    printf("Font grid saved to %s\n", outputPath);
-
-    /* Cleanup */
-    free(rgbBuffer);
-    free(grayBuffer);
+    /* Final cleanup */
+    free(availableGlyphs);
     free(fontBuffer);
 
     return 0;
