@@ -1,14 +1,29 @@
 /*
  * foview.cpp - Generate PNG and PDF images showing all available glyphs in a font
  *
- * Modern C++ implementation using pdfimg.hpp for PDF generation.
- * 
- * Key features:
- * - Modern C++ with RAII, smart pointers, containers
- * - Uses pdfimg.hpp for all PDF generation and compression
- * - Flexible command-line parsing with positional arguments
- * - Support for multiple compression types
- * - Single or multi-page output based on glyph count
+ * This example demonstrates how to:
+ * 1. Load a TrueType font using struetype.h
+ * 2. Scan the entire Unicode range (0-0x10FFFF) to find all available glyphs
+ * 3. Render ALL glyphs that exist in the font using stt_GetCodepointBitmap
+ * 4. Arrange glyphs in a grid layout with optional grid lines
+ * 5. Center each glyph visually in its grid cell using font metrics
+ * 6. Render characters darker on light background using simple subtraction
+ * 7. Convert grayscale bitmap to RGB format
+ * 8. Generate appropriate output based on glyph count:
+ *    - Single page: Both PNG and PDF output
+ *    - Multiple pages: PDF-only output with all pages
+ * 9. Smart output naming: single file as .png/.pdf, multiple as .pdf only
+ * 10. Add footer with font name and Unicode range using embedded ProFont
+ *
+ * Key rendering features:
+ * - Uses font ascent/descent metrics to calculate proper baseline positioning
+ * - Centers glyphs horizontally and vertically for visual consistency
+ * - Ignores xOffset/yOffset for cleaner visual centering
+ * - Simple subtraction blending for crisp, dark text on light background
+ * - Scans entire Unicode range using stt_FindGlyphIndex to find available glyphs
+ * - Target maximum image size of 1500x2000 pixels (portrait, 300dpi print ready)
+ * - Adaptive sizing: single-page output sized to fit content, multi-page uses uniform dimensions
+ * - Footer displays font name and Unicode range using embedded ProFont
  */
 
 #include <iostream>
@@ -324,10 +339,10 @@ int main(int argc, const char* argv[]) {
             ("c,compression", "Compression method for PDF images: " + get_available_compression_methods(), 
              cxxopts::value<std::string>()->default_value(compression_type_to_string_local(get_default_compression())))
             ("h,help", "Show this help message")
-            ("positional", "Positional arguments (for backward compatibility)", cxxopts::value<std::vector<std::string>>())
+            ("positional", "Positional arguments", cxxopts::value<std::vector<std::string>>())
             ;
         
-        // Allow positional arguments for backward compatibility
+        // Allow positional arguments
         options.parse_positional({"positional"});
         
         // Parse command line arguments
