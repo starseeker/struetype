@@ -1,0 +1,1 @@
+/usr/bin/cc -Wl,--dependency-file=CMakeFiles/genpng.dir/link.d CMakeFiles/genpng.dir/genpng.c.o CMakeFiles/genpng.dir/miniz/miniz.c.o -o genpng  -lm
