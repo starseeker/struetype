@@ -1,11 +1,14 @@
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/miniz")
-add_executable(genpng genpng.c miniz/miniz.c)
+include_directories(
+  "${CMAKE_CURRENT_SOURCE_DIR}/miniz"
+  "${CMAKE_CURRENT_SOURCE_DIR}/toojpeg.h"
+  )
+add_executable(foview foview.cpp miniz/miniz.c toojpeg/toojpeg.cpp)
 if (M_LIBRARY)
-  target_link_libraries(genpng ${M_LIBRARY})
+  target_link_libraries(foview ${M_LIBRARY})
 endif (M_LIBRARY)
 
 # ProFont (relatively small and simple font)
-add_test(NAME ProFontGrid COMMAND genpng ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
+add_test(NAME ProFontGrid COMMAND foview ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
 
 # DejaUu ttf files
 file(GLOB DEJAVU_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/dejavu/ttf/*.ttf")
@@ -13,7 +16,7 @@ foreach(TTF ${DEJAVU_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
     NAME "${TTFNAME}"
-    COMMAND genpng ${TTF}
+    COMMAND foview ${TTF}
   )
 endforeach()
 
@@ -23,7 +26,7 @@ foreach(TTF ${STIX_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
     NAME "${TTFNAME}"
-    COMMAND genpng ${TTF}
+    COMMAND foview ${TTF}
   )
 endforeach()
 
@@ -33,7 +36,7 @@ foreach(TTF ${UNIFONT_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
     NAME "${TTFNAME}"
-    COMMAND genpng ${TTF}
+    COMMAND foview ${TTF}
   )
 endforeach()
 

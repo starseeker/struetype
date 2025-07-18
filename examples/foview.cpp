@@ -1,5 +1,5 @@
 /*
- * genpng.c - Generate PNG and PDF images showing all available glyphs in a font
+ * foview.cpp - Generate PNG and PDF images showing all available glyphs in a font
  *
  * This example demonstrates how to:
  * 1. Load a TrueType font using struetype.h
@@ -33,8 +33,8 @@
  * - Footer always rendered using embedded ProFont (always available, never skipped)
  * - Print-ready 1500x2000 pixel output size for multi-page (5" x 6.67" at 300dpi)
  *
- * Usage: genpng [font_file] [output_prefix]
- * Defaults: genpng profont/ProFont.ttf fontgrid
+ * Usage: foview [font_file] [output_prefix]
+ * Defaults: foview profont/ProFont.ttf fontgrid
  * Output: 
  *   - Single page: fontgrid.png and fontgrid.pdf
  *   - Multiple pages: fontgrid.pdf only
@@ -82,7 +82,7 @@ void get_output_prefix(const char *fontPath, const char *userPrefix, char *outpu
 int collect_available_glyphs(stt_fontinfo *info, int **glyphs) {
     int count = 0;
     int capacity = 1000; /* Start with reasonable capacity */
-    int *glyph_list = malloc(capacity * sizeof(int));
+    int *glyph_list = (int *)malloc(capacity * sizeof(int));
     
     if (!glyph_list) {
         printf("Failed to allocate memory for glyph collection\n");
@@ -95,7 +95,7 @@ int collect_available_glyphs(stt_fontinfo *info, int **glyphs) {
             /* Found a glyph for this codepoint */
             if (count >= capacity) {
                 capacity *= 2;
-                int *new_list = realloc(glyph_list, capacity * sizeof(int));
+                int *new_list = (int *)realloc(glyph_list, capacity * sizeof(int));
                 if (!new_list) {
                     printf("Failed to reallocate memory for glyph collection\n");
                     free(glyph_list);
@@ -270,7 +270,7 @@ int main(int argc, const char *argv[])
     long size = ftell(fontFile);
     fseek(fontFile, 0, SEEK_SET);
 
-    unsigned char *fontBuffer = calloc(size, sizeof(unsigned char));
+    unsigned char *fontBuffer = (unsigned char *)calloc(size, sizeof(unsigned char));
     fread(fontBuffer, size, 1, fontFile);
     fclose(fontFile);
 
@@ -331,7 +331,7 @@ int main(int argc, const char *argv[])
     float baseline = (cellHeight / 2.0f) + ((ascent - descent) / 2.0f * scale) - (ascent * scale);
 
     /* Allocate array to store image data for all pages */
-    ImageData *images = malloc(numFiles * sizeof(ImageData));
+    ImageData *images = (ImageData *)malloc(numFiles * sizeof(ImageData));
     if (!images) {
         printf("Failed to allocate memory for image data\n");
         free(availableGlyphs);
@@ -373,7 +373,7 @@ int main(int argc, const char *argv[])
                startCodepoint, endCodepoint);
 
         /* Create grayscale image buffer */
-        unsigned char *grayBuffer = calloc(imageWidth * imageHeight, sizeof(unsigned char));
+        unsigned char *grayBuffer = (unsigned char *)calloc(imageWidth * imageHeight, sizeof(unsigned char));
         if (!grayBuffer) {
             printf("Failed to allocate image buffer\n");
             free(availableGlyphs);
@@ -455,7 +455,7 @@ int main(int argc, const char *argv[])
                      fontName, startCodepoint, endCodepoint);
 
         /* Convert grayscale to RGB */
-        unsigned char *rgbBuffer = malloc(imageWidth * imageHeight * 3);
+        unsigned char *rgbBuffer = (unsigned char *)malloc(imageWidth * imageHeight * 3);
         if (!rgbBuffer) {
             printf("Failed to allocate RGB buffer\n");
             free(grayBuffer);
