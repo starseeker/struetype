@@ -161,72 +161,28 @@ static inline int pdfimg_add_image_page_with_data(pdfimg_doc_t *pdf,
     int output_size;
     uint8_t *output_data;
     
-#ifdef PDFIMG_ENABLE_COMPRESSION
-    // Create temporary buffer for uncompressed image data
-    uint8_t *temp_buf = (uint8_t*)malloc(img_data_size);
-    if (!temp_buf) {
-        return 0; // Memory allocation failed
-    }
-    
-    // Copy image data to temporary buffer, row by row
-    for (int y = 0; y < h; ++y) {
-        memcpy(temp_buf + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
-    }
-    
-    // Compress the image data
-    mz_ulong compressed_size = mz_compressBound(img_data_size);
-    output_data = (uint8_t*)malloc(compressed_size);
-    if (!output_data) {
-        free(temp_buf);
-        return 0; // Memory allocation failed
-    }
-    
-    int result = mz_compress(output_data, &compressed_size, temp_buf, img_data_size);
-    free(temp_buf);
-    
-    if (result != MZ_OK) {
-        free(output_data);
-        return 0; // Compression failed
-    }
-    
-    output_size = compressed_size;
-#else
-    // No compression: create buffer with uncompressed data
-    output_data = (uint8_t*)malloc(img_data_size);
-    if (!output_data) {
-        return 0; // Memory allocation failed
-    }
-    
-    // Copy image data, row by row
-    for (int y = 0; y < h; ++y) {
-        memcpy(output_data + y * w * (is_rgb ? 3 : 1), buf + y * stride, w * (is_rgb ? 3 : 1));
-    }
-    
-    output_size = img_data_size;
-#endif
+    // Use the provided image data directly (assumed to be pre-processed)
+    output_data = (uint8_t*)image_data;
+    output_size = image_data_size;
     
     // Add image object
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n", img_obj);
     
-#ifdef PDFIMG_ENABLE_COMPRESSION
-    pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
-        "/ColorSpace /Device%s /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n",
-        w, h, is_rgb ? "RGB" : "Gray", output_size);
-#else
+    // Write image dictionary with appropriate filter and length
     pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
         "/ColorSpace /Device%s /BitsPerComponent 8%s /Length %zu >>\nstream\n",
-        w, h, is_rgb ? "RGB" : "Gray", filter_name, image_data_size);
+        w, h, is_rgb ? "RGB" : "Gray", filter_name, output_size);
     
     // Ensure buffer capacity for image data
-    if (pdf->len + image_data_size >= pdf->cap) {
-        pdf->cap = pdf->len + image_data_size + 1024;
+    if (pdf->len + output_size >= pdf->cap) {
+        pdf->cap = pdf->len + output_size + 1024;
         pdf->data = (uint8_t*)realloc(pdf->data, pdf->cap);
     }
     
     // Copy image data
-    memcpy(pdf->data + pdf->len, image_data, image_data_size);
-    pdf->len += image_data_size;
+    memcpy(pdf->data + pdf->len, output_data, output_size);
+    pdf->len += output_size;
     
     pdfimg_append(pdf, "\nendstream\nendobj\n");
     
