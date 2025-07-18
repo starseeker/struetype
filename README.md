@@ -25,3 +25,7 @@ The API changes are (and must be) breaking, since addressing the problems
 requires knowledge about buffer sizes the original APIs don't provide.
 Accordingly, we have renamed the header and changed the function names to
 use a different prefix.
+
+The foview example will take a .ttf file and produce a PDF (and a PNG if
+the character set is small enough, which it usually isn't on modern fonts)
+visualizing the glyphs defined by the font.
