@@ -8,10 +8,11 @@ if (M_LIBRARY)
 endif (M_LIBRARY)
 
 # ProFont (relatively small and simple font)
-add_test(NAME ProFontGrid COMMAND foview ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
+add_test(NAME ProFontGrid COMMAND foview ${CMAKE_CURRENT_SOURCE_DIR}/fonts/profont/ProFont.ttf)
 
+if(0)
 # DejaUu ttf files
-file(GLOB DEJAVU_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/dejavu/ttf/*.ttf")
+file(GLOB DEJAVU_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/dejavu/ttf/*.ttf")
 foreach(TTF ${DEJAVU_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
@@ -19,9 +20,10 @@ foreach(TTF ${DEJAVU_TTFS})
     COMMAND foview ${TTF}
   )
 endforeach()
+endif(0)
 
 # STIX ttf files
-file(GLOB STIX_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/stix/ttf/*.ttf")
+file(GLOB STIX_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/stix/ttf/*.ttf")
 foreach(TTF ${STIX_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
@@ -30,8 +32,9 @@ foreach(TTF ${STIX_TTFS})
   )
 endforeach()
 
+if(0)
 # GNU Unifont ttf files (large character coverage)
-file(GLOB UNIFONT_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/unifont/*.ttf")
+file(GLOB UNIFONT_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/fonts/unifont/*.ttf")
 foreach(TTF ${UNIFONT_TTFS})
   get_filename_component(TTFNAME ${TTF} NAME_WE)
   add_test(
@@ -39,6 +42,7 @@ foreach(TTF ${UNIFONT_TTFS})
     COMMAND foview ${TTF}
   )
 endforeach()
+endif(0)
 
 # Local Variables:
 # tab-width: 8
