@@ -11,7 +11,7 @@
  * 7. Convert grayscale bitmap to RGB format
  * 8. Automatically split output into multiple PNG files if needed to stay within size limits
  * 9. Smart output naming: single file as .png, multiple files as <root>-01.png, etc.
- * 10. Add footer with font name and Unicode range using the font itself
+ * 10. Add footer with font name and Unicode range using embedded ProFont
  *
  * Key rendering features:
  * - Uses font ascent/descent metrics to calculate proper baseline positioning
@@ -21,14 +21,14 @@
  * - Scans entire Unicode range using stt_FindGlyphIndex to find available glyphs
  * - Target maximum image size of 1500x2000 pixels (portrait, 300dpi print ready)
  * - Adaptive sizing: single-page output sized to fit content, multi-page uses uniform dimensions
- * - Footer displays font name and Unicode range using the font being visualized
+ * - Footer displays font name and Unicode range using embedded ProFont
  *
  * Enhanced sizing logic:
  * - Single-page output: Image sized just large enough to fit grid and footer (may be smaller than max)
  * - Multi-page output: All pages use uniform 1500x2000 pixel dimensions (including last page)
  * - Smart output naming: single image without suffix, multiple with zero-padded numbers
  * - Footer strip below grid showing font name and Unicode range
- * - Footer rendered using the font itself if all characters are available, otherwise skipped
+ * - Footer always rendered using embedded ProFont (always available, never skipped)
  * - Print-ready 1500x2000 pixel output size for multi-page (5" x 6.67" at 300dpi)
  *
  * Usage: genpng [font_file] [output_prefix]
@@ -43,6 +43,9 @@
 #define STRUETYPE_IMPLEMENTATION
 #include "struetype.h"
 #include "svpng.h"
+
+/* Embedded ProFont.ttf data for footer rendering */
+#include "profont_embedded.h"
 
 /* Function to extract base name from font file path and create output prefix */
 void get_output_prefix(const char *fontPath, const char *userPrefix, char *outputPrefix, size_t bufferSize) {
@@ -103,45 +106,34 @@ void get_font_name(const char *fontPath, char *fontName, size_t bufferSize) {
     free(fontPathCopy);
 }
 
-/* Function to check if all characters in a string are available in the font */
-int all_chars_available(stt_fontinfo *info, const char *text) {
-    const char *ptr = text;
-    while (*ptr) {
-        int codepoint = (unsigned char)*ptr;
-        if (stt_FindGlyphIndex(info, codepoint) == 0) {
-            return 0; /* Character not available */
-        }
-        ptr++;
-    }
-    return 1; /* All characters available */
-}
-
-/* Function to render footer text using the font */
-void render_footer(stt_fontinfo *info, unsigned char *buffer, int imageWidth, int imageHeight, 
+/* Function to render footer text using embedded ProFont */
+void render_footer(stt_fontinfo *mainInfo, unsigned char *buffer, int imageWidth, int imageHeight, 
                    int footerHeight, const char *fontName, int startCodepoint, int endCodepoint) {
-    /* Create footer text */
+    /* Create footer text with space between font name and Unicode range */
     char footerText[256];
-    snprintf(footerText, sizeof(footerText), "Font: %s   U+%04X-U+%04X", 
+    snprintf(footerText, sizeof(footerText), "Font: %s U+%04X-U+%04X", 
              fontName, startCodepoint, endCodepoint);
     
-    /* Check if all characters are available */
-    if (!all_chars_available(info, footerText)) {
-        return; /* Skip footer if characters not available */
+    /* Initialize embedded ProFont for footer rendering */
+    stt_fontinfo footerFont;
+    if (!stt_InitFont(&footerFont, profont_ttf_data, profont_ttf_data_len, 0)) {
+        /* If ProFont fails to load, skip footer (shouldn't happen) */
+        return;
     }
     
     /* Calculate font scaling for footer */
-    float footerScale = stt_ScaleForPixelHeight(info, 14);
+    float footerScale = stt_ScaleForPixelHeight(&footerFont, 14);
     
     /* Get font metrics */
     int ascent, descent, lineGap;
-    stt_GetFontVMetrics(info, &ascent, &descent, &lineGap);
+    stt_GetFontVMetrics(&footerFont, &ascent, &descent, &lineGap);
     
     /* Calculate text dimensions */
     int textWidth = 0;
     const char *ptr = footerText;
     while (*ptr) {
         int advance, leftSideBearing;
-        stt_GetCodepointHMetrics(info, *ptr, &advance, &leftSideBearing);
+        stt_GetCodepointHMetrics(&footerFont, *ptr, &advance, &leftSideBearing);
         textWidth += (int)(advance * footerScale);
         ptr++;
     }
@@ -155,7 +147,7 @@ void render_footer(stt_fontinfo *info, unsigned char *buffer, int imageWidth, in
     ptr = footerText;
     while (*ptr) {
         int glyphWidth, glyphHeight, xOffset, yOffset;
-        unsigned char *glyphBitmap = stt_GetCodepointBitmap(info, footerScale, footerScale,
+        unsigned char *glyphBitmap = stt_GetCodepointBitmap(&footerFont, footerScale, footerScale,
                                                              *ptr, &glyphWidth, &glyphHeight,
                                                              &xOffset, &yOffset);
         
@@ -186,7 +178,7 @@ void render_footer(stt_fontinfo *info, unsigned char *buffer, int imageWidth, in
             
             /* Advance to next character position */
             int advance, leftSideBearing;
-            stt_GetCodepointHMetrics(info, *ptr, &advance, &leftSideBearing);
+            stt_GetCodepointHMetrics(&footerFont, *ptr, &advance, &leftSideBearing);
             currentX += (int)(advance * footerScale);
             
             /* Free the glyph bitmap */
