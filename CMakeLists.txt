@@ -15,17 +15,8 @@ endif (NOT MSVC)
 find_library(M_LIBRARY m)
 
 include(CTest)
-
-add_subdirectory(CVE-2020-6617)
-add_subdirectory(CVE-2020-6618)
-add_subdirectory(CVE-2020-6619)
-add_subdirectory(CVE-2020-6620)
-add_subdirectory(CVE-2020-6621)
-add_subdirectory(CVE-2020-6622)
-add_subdirectory(CVE-2020-6623)
-add_subdirectory(CVE-2022-25514)
-add_subdirectory(CVE-2022-25515)
-add_subdirectory(CVE-2022-25516)
+add_subdirectory(tests)
+add_subdirectory(examples)
 
 # Local Variables:
 # tab-width: 8
