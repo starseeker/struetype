@@ -14,8 +14,8 @@ int main(int argc, const char *argv[])
     fread(fontBuffer, size, 1, fontFile);
     fclose(fontFile);
 
-    stbtt_fontinfo info;
-    if (!stbtt_InitFont(&info, fontBuffer, size, 0))
+    stt_fontinfo info;
+    if (!stt_InitFont(&info, fontBuffer, size, 0))
         printf("failed\n");
 
     free(fontBuffer);
