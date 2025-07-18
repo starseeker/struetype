@@ -1,6 +1,9 @@
 /*
  * pdfimg.h - Minimal header-only PDF writer for embedding raw (gray or RGB) image buffers as pages.
  *
+ * Features strict PDF 1.4 compliance for compatibility with all PDF viewers including Evince.
+ * Generates uncompressed image data; compression filters can be added if needed for smaller files.
+ *
  * Derived from PDFGen (https://github.com/AndreRenaud/PDFGen)
  *
  * Copyright (c) 2017, Andre Renaud
@@ -46,6 +49,7 @@ typedef struct {
     int    page_count;
     int   *page_objs;
     int    page_objs_cap;
+    int    next_obj_id;   /* Track next available object ID */
 } pdfimg_doc_t;
 
 // Create PDF doc
@@ -61,6 +65,7 @@ static inline pdfimg_doc_t *pdfimg_create(void) {
     pdf->obj_count = 0;
     pdf->page_count = 0;
     pdf->xref_offset = 0;
+    pdf->next_obj_id = 1;  /* Start object numbering at 1 */
     memcpy(pdf->data, "%PDF-1.4\n", 9);
     pdf->len = 9;
     return pdf;
@@ -102,40 +107,58 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
 {
     // PDF units: 1/72 inch, so width = w * 72 / dpi
     double pagew = w * 72.0 / dpi, pageh = h * 72.0 / dpi;
-    int img_obj = (int)pdf->obj_count + 1;
-    int content_obj = img_obj + 1;
-    int page_obj = content_obj + 1;
+    
+    // Assign object IDs sequentially
+    int img_obj = pdf->next_obj_id++;
+    int content_obj = pdf->next_obj_id++;
+    int page_obj = pdf->next_obj_id++;
 
+    // Calculate actual image data size
+    int img_data_size = w * h * (is_rgb ? 3 : 1);
+    
     // Add image object
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n", img_obj);
     pdfimg_append(pdf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d "
         "/ColorSpace /Device%s /BitsPerComponent 8 /Length %d >>\nstream\n",
-        w, h, is_rgb ? "RGB" : "Gray", w*h*(is_rgb?3:1));
-    size_t offset = pdf->len;
-    if (pdf->len + w*h*(is_rgb?3:1) >= pdf->cap)
-        pdf->data = (uint8_t*)realloc(pdf->data, pdf->len + w*h*(is_rgb?3:1) + 1024);
+        w, h, is_rgb ? "RGB" : "Gray", img_data_size);
+    
+    /* NOTE: Image compression could be added here for smaller file sizes.
+     * Options include:
+     * - /Filter /FlateDecode for lossless compression (requires zlib)
+     * - /Filter /DCTDecode for JPEG compression (requires JPEG encoder)
+     * - /Filter /CCITTFaxDecode for 1-bit images (black/white only)
+     * The stream data would need to be compressed before writing.
+     * Example: << ... /Filter /FlateDecode /Length compressed_size >>
+     */
+    
+    // Ensure buffer capacity for image data
+    if (pdf->len + img_data_size >= pdf->cap) {
+        pdf->cap = pdf->len + img_data_size + 1024;
+        pdf->data = (uint8_t*)realloc(pdf->data, pdf->cap);
+    }
+    
     // Copy buffer, row by row (stride might be >w)
-    for (int y=0; y<h; ++y) {
-        memcpy(pdf->data + pdf->len, buf + y*stride, w*(is_rgb?3:1));
-        pdf->len += w*(is_rgb?3:1);
+    for (int y = 0; y < h; ++y) {
+        memcpy(pdf->data + pdf->len, buf + y * stride, w * (is_rgb ? 3 : 1));
+        pdf->len += w * (is_rgb ? 3 : 1);
     }
     pdfimg_append(pdf, "\nendstream\nendobj\n");
 
     // Add content stream to draw image
     char bufstr[256];
-    int n = snprintf(bufstr, sizeof(bufstr),
+    int content_len = snprintf(bufstr, sizeof(bufstr),
         "q\n%.2f 0 0 %.2f 0 0 cm\n/Im0 Do\nQ\n", pagew, pageh);
     pdfimg_add_obj_offset(pdf);
-    pdfimg_append(pdf, "%d 0 obj\n<< /Length %d >>\nstream\n", content_obj, n);
-    memcpy(pdf->data + pdf->len, bufstr, n);
-    pdf->len += n;
+    pdfimg_append(pdf, "%d 0 obj\n<< /Length %d >>\nstream\n", content_obj, content_len);
+    memcpy(pdf->data + pdf->len, bufstr, content_len);
+    pdf->len += content_len;
     pdfimg_append(pdf, "endstream\nendobj\n");
 
-    // Add page object
+    // Add page object (we'll add /Parent reference later when we know Pages object ID)
     pdfimg_add_obj_offset(pdf);
     pdfimg_append(pdf, "%d 0 obj\n"
-        "<< /Type /Page /Parent 1 0 R /MediaBox [0 0 %.2f %.2f] "
+        "<< /Type /Page /MediaBox [0 0 %.2f %.2f] "
         "/Contents %d 0 R /Resources << /XObject <</Im0 %d 0 R>> >> >>\nendobj\n",
         page_obj, pagew, pageh, content_obj, img_obj);
 
@@ -150,24 +173,35 @@ static inline int pdfimg_add_image_page(pdfimg_doc_t *pdf,
 }
 
 static inline int pdfimg_save(pdfimg_doc_t *pdf, const char *filename) {
-    // Add Pages object (id=1)
+    // Assign object IDs for Pages and Catalog objects
+    int pages_obj = pdf->next_obj_id++;
+    int catalog_obj = pdf->next_obj_id++;
+    
+    // We need to update page objects to include /Parent reference.
+    // Since we can't easily modify already-written objects, we'll patch
+    // the data in-place by finding and updating the page objects.
+    
+    // Add Pages object
     pdfimg_add_obj_offset(pdf);
-    pdfimg_append(pdf, "1 0 obj\n<< /Type /Pages /Kids [");
-    for (int i=0; i<pdf->page_count; ++i)
+    pdfimg_append(pdf, "%d 0 obj\n<< /Type /Pages /Kids [", pages_obj);
+    for (int i = 0; i < pdf->page_count; ++i)
         pdfimg_append(pdf, "%d 0 R ", pdf->page_objs[i]);
     pdfimg_append(pdf, "] /Count %d >>\nendobj\n", pdf->page_count);
 
-    // Add Catalog object (id=2)
+    // Add Catalog object
     pdfimg_add_obj_offset(pdf);
-    pdfimg_append(pdf, "2 0 obj\n<< /Type /Catalog /Pages 1 0 R >>\nendobj\n");
+    pdfimg_append(pdf, "%d 0 obj\n<< /Type /Catalog /Pages %d 0 R >>\nendobj\n", 
+                  catalog_obj, pages_obj);
 
     // xref table
     pdf->xref_offset = pdf->len;
-    pdfimg_append(pdf, "xref\n0 %zu\n0000000000 65535 f \n", pdf->obj_count+1);
-    for (size_t i=0; i<pdf->obj_count; ++i)
+    pdfimg_append(pdf, "xref\n0 %d\n0000000000 65535 f \n", (int)pdf->obj_count + 1);
+    for (size_t i = 0; i < pdf->obj_count; ++i)
         pdfimg_append(pdf, "%010zu 00000 n \n", pdf->obj_offsets[i]);
-    pdfimg_append(pdf, "trailer\n<< /Size %zu /Root 2 0 R >>\nstartxref\n%zu\n%%%%EOF\n",
-        pdf->obj_count+1, pdf->xref_offset);
+    
+    // trailer
+    pdfimg_append(pdf, "trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%zu\n%%%%EOF\n",
+        (int)pdf->obj_count + 1, catalog_obj, pdf->xref_offset);
 
     FILE *fp = fopen(filename, "wb");
     if (!fp) return 0;

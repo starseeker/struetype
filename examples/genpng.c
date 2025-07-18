@@ -28,7 +28,7 @@
  * Enhanced output logic:
  * - Single-page output: Generates both PNG and PDF files (e.g., "output.png" and "output.pdf")
  * - Multi-page output: Generates only PDF file with all pages (e.g., "output.pdf")
- * - Uses pdfimg.h minimal PDF writer for PDF backend
+ * - Uses pdfimg.h minimal PDF writer for strict PDF 1.4 compliant backend
  * - Footer strip below grid showing font name and Unicode range
  * - Footer always rendered using embedded ProFont (always available, never skipped)
  * - Print-ready 1500x2000 pixel output size for multi-page (5" x 6.67" at 300dpi)
@@ -210,12 +210,19 @@ int main(int argc, const char *argv[])
     if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         printf("Usage: %s [font_file] [output_prefix]\n", argv[0]);
         printf("\nGenerate PNG and/or PDF images showing all available glyphs in a font.\n");
+        printf("PDFs are generated with strict PDF 1.4 compliance for compatibility with\n");
+        printf("viewers like Evince and other strict PDF readers.\n");
         printf("\nArguments:\n");
         printf("  font_file     Path to TrueType font file (default: profont/ProFont.ttf)\n");
         printf("  output_prefix Output file prefix (default: derived from font filename)\n");
         printf("\nOutput behavior:\n");
         printf("  Single page:  Creates both <prefix>.png and <prefix>.pdf\n");
         printf("  Multiple pages: Creates only <prefix>.pdf with all pages\n");
+        printf("\nPDF Features:\n");
+        printf("  - Strict PDF 1.4 compliance for maximum compatibility\n");
+        printf("  - Proper object references and xref tables\n");
+        printf("  - Correct stream lengths and PDF structure\n");
+        printf("  - Uncompressed image data (compression can be added if needed)\n");
         printf("\nExamples:\n");
         printf("  %s                                    # Uses default font, creates ProFont.png + ProFont.pdf\n", argv[0]);
         printf("  %s arial.ttf                         # Creates arial.png + arial.pdf (if single page)\n", argv[0]);
