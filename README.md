@@ -3,6 +3,10 @@
 Fork of the stb_truetype.h v1.26 font header originally from
 https://github.com/nothings/stb
 
+<div align="center">
+  ![ProFont Glyph Grid](/examples/ProFont.png)
+</div>
+
 Makes API changes to address the 2020/2022 CVE reports, which are considered
 out of scope by upstream. The specific CVE reports in question are:
 

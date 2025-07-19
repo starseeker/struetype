@@ -1,5 +1,5 @@
 # ProFont (relatively small and simple font)
-add_test(NAME ProFontGrid COMMAND foview ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
+add_test(NAME ProFont COMMAND foview ${CMAKE_CURRENT_SOURCE_DIR}/profont/ProFont.ttf)
 
 # DejaUu ttf files
 file(GLOB DEJAVU_TTFS "${CMAKE_CURRENT_SOURCE_DIR}/dejavu/ttf/*.ttf")
