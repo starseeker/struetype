@@ -1,5 +1,7 @@
 /*
- * foview.cpp - Generate PNG and PDF images showing all available glyphs in a font
+ * foview.cpp - Generate PNG and PDF images showing all available glyphs in a
+ * font, rendered in a grid.  Github Copilot GPT-4.1 was used to produce this
+ * example circa July 2025.
  *
  * This example demonstrates how to:
  * 1. Load a TrueType font using struetype.h
@@ -24,6 +26,47 @@
  * - Target maximum image size of 1500x2000 pixels (portrait, 300dpi print ready)
  * - Adaptive sizing: single-page output sized to fit content, multi-page uses uniform dimensions
  * - Footer displays font name and Unicode range using embedded ProFont
+ *
+ * We'll go with the same license as struetype.h:
+ * ------------------------------------------------------------------------------
+ * This software is available under 2 licenses -- choose whichever you prefer.
+ * ------------------------------------------------------------------------------
+ * ALTERNATIVE A - MIT License
+ * Copyright (c) 2025 Clifford Yapp
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ * of the Software, and to permit persons to whom the Software is furnished to do
+ * so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ * ------------------------------------------------------------------------------
+ * ALTERNATIVE B - Public Domain (www.unlicense.org)
+ * This is free and unencumbered software released into the public domain.
+ * Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+ * software, either in source code form or as a compiled binary, for any purpose,
+ * commercial or non-commercial, and by any means.
+ * In jurisdictions that recognize copyright laws, the author or authors of this
+ * software dedicate any and all copyright interest in the software to the public
+ * domain. We make this dedication for the benefit of the public at large and to
+ * the detriment of our heirs and successors. We intend this dedication to be an
+ * overt act of relinquishment in perpetuity of all present and future rights to
+ * this software under copyright law.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * ------------------------------------------------------------------------------
  */
 
 #include <iostream>
@@ -88,7 +131,7 @@ public:
     }
 };
 
-// Font renderer class using RAII
+// Font renderer class using Resource Acquisition Is Initialization (RAII)
 class FontRenderer {
 private:
     std::unique_ptr<uint8_t[]> font_buffer_;
