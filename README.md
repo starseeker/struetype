@@ -19,6 +19,21 @@ breaking, since addressing the problems requires knowledge about buffer sizes
 the original APIs don't provide.  Accordingly, we have renamed the header and
 changed the function names to use a different prefix.
 
+All public functions that inspect a raw font buffer require its exact byte
+size.  Font initialization validates the SFNT table directory and the required
+TrueType or CFF tables before exposing them through `stt_fontinfo`.  Glyph,
+kerning, name, SVG, raster, SDF, baking, and atlas paths use bounded reads,
+checked allocation arithmetic, recursion and tessellation limits, and graceful
+allocation-failure handling.  Default bitmap and tessellation limits may be
+overridden with `STT_MAX_BITMAP_PIXELS` and
+`STT_MAX_TESSELLATION_POINTS` before including the implementation.
+
+The test suite applies the historical CVE inputs to every sanitizer-enabled
+test executable.  It also tests every truncation of a valid font,
+deterministically corrupts the file throughout, exercises the baking and atlas
+APIs, and injects allocation failures.  Sanitizers can be disabled for a
+normal build with `-DSTRUETYPE_ENABLE_SANITIZERS=OFF`.
+
 The specific CVE reports in question are:
 
 * [CVE-2022-25516](https://nvd.nist.gov/vuln/detail/CVE-2022-25516)
@@ -32,8 +47,7 @@ The specific CVE reports in question are:
 * [CVE-2020-6618](https://nvd.nist.gov/vuln/detail/CVE-2020-6618)
 * [CVE-2020-6617](https://nvd.nist.gov/vuln/detail/CVE-2020-6617)
 
-The test cases are set up in the test directory to be runnable with make test
+The test cases are set up in the test directory to be runnable with `make test`
 or ctest, ensuring we can reproduce and test the failure cases.  The code and
-files are from the Github issues associated with these CVEs - see the above
+files are from the GitHub issues associated with these CVEs - see the above
 links for more details.
-

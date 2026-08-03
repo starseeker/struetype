@@ -17,7 +17,7 @@
 //
 //   Todo:
 //        non-MS cmaps
-//        crashproof on bad data
+//        expand malformed-font fuzzing across additional formats
 //        hinting? (no longer patented)
 //        cleartype-style AA?
 //        optimize: use simple memory allocator for intermediates
@@ -56,6 +56,9 @@
 //
 // VERSION HISTORY
 //
+//   struetype (2026-08-03) comprehensive bounds, overflow, allocation,
+//                         rasterizer, CFF, collection, and atlas hardening
+//                         with size-aware raw-buffer APIs
 //   1.26 (2021-08-28) fix broken rasterizer
 //   1.25 (2021-07-11) many fixes
 //   1.24 (2020-02-05) fix warning
@@ -96,7 +99,7 @@
 //   implementation into that C/C++ file.
 //
 //   To make the implementation private to the file that generates the implementation,
-//      #define STBTT_STATIC
+//      #define STT_STATIC
 //
 //   Simple 3D API (don't ship this, but it's fine for tools and quick start)
 //           stt_BakeFontBitmap()               -- bake a font to a bitmap for use as texture
@@ -132,7 +135,7 @@
 //   where multiple shapes overlap, in which case it overestimates the AA pixel
 //   coverage. Thus, anti-aliasing of intersecting shapes may look wrong. If
 //   this turns out to be a problem, you can re-enable the old rasterizer with
-//        #define STBTT_RASTERIZER_VERSION 1
+//        #define STT_RASTERIZER_VERSION 1
 //   which will incur about a 15% speed hit.
 //
 // ADDITIONAL DOCUMENTATION
@@ -274,7 +277,7 @@
 //  See "tests/truetype_demo_win32.c" for a complete version.
 #if 0
 #define STRUETYPE_IMPLEMENTATION  // force following include to generate implementation
-#include "stb_truetype.h"
+#include "struetype.h"
 
 unsigned char ttf_buffer[1<<20];
 unsigned char temp_bitmap[512*512];
@@ -325,7 +328,7 @@ void my_stt_print(float x, float y, char *text)
 #if 0
 #include <stdio.h>
 #define STRUETYPE_IMPLEMENTATION  // force following include to generate implementation
-#include "stb_truetype.h"
+#include "struetype.h"
 
 char ttf_buffer[1<<25];
 
@@ -337,7 +340,8 @@ int main(int argc, char **argv)
 
    fread(ttf_buffer, 1, 1<<25, fopen(argc > 3 ? argv[3] : "c:/windows/fonts/arialbd.ttf", "rb"));
 
-   stt_InitFont(&font, ttf_buffer, 1<<25, stt_GetFontOffsetForIndex(ttf_buffer,0));
+   stt_InitFont(&font, ttf_buffer, 1<<25,
+                stt_GetFontOffsetForIndex(ttf_buffer, 1<<25, 0));
    bitmap = stt_GetCodepointBitmap(&font, 0,stt_ScaleForPixelHeight(&font, s), c, &w, &h, 0,0);
 
    for (j=0; j < h; ++j) {
@@ -417,7 +421,7 @@ int main(int arg, char **argv)
 ////   INTEGRATION WITH YOUR CODEBASE
 ////
 ////   The following sections allow you to supply alternate definitions
-////   of C library functions used by stb_truetype, e.g. if you don't
+////   of C library functions used by struetype, e.g. if you don't
 ////   link with the C runtime library.
 
 #ifdef STRUETYPE_IMPLEMENTATION
@@ -647,7 +651,7 @@ STT_DEF void stt_PackSetOversampling(stt_pack_context *spc, unsigned int h_overs
 // call to PackFontRangesGatherRects.
 
 STT_DEF void stt_PackSetSkipMissingCodepoints(stt_pack_context *spc, int skip);
-// If skip != 0, this tells stb_truetype to skip any codepoints for which
+// If skip != 0, this tells struetype to skip any codepoints for which
 // there is no corresponding glyph. If skip=0, which is the default, then
 // codepoints without a glyph recived the font's "missing character" glyph,
 // typically an empty box by convention.
@@ -692,14 +696,14 @@ struct stt_pack_context {
 //
 //
 
-STT_DEF int stt_GetNumberOfFonts(const unsigned char *data);
+STT_DEF int stt_GetNumberOfFonts(const unsigned char *data, int data_size);
 // This function will determine the number of fonts in a font file.  TrueType
 // collection (.ttc) files may contain multiple fonts, while TrueType font
 // (.ttf) files only contain one font. The number of fonts can be used for
 // indexing with the previous function where the index is between zero and one
 // less than the total fonts. If an error occurs, -1 is returned.
 
-STT_DEF int stt_GetFontOffsetForIndex(const unsigned char *data, int index);
+STT_DEF int stt_GetFontOffsetForIndex(const unsigned char *data, int data_size, int index);
 // Each .ttf/.ttc file may have more than one font. Each font has a sequential
 // index number starting from 0. Call this function to get the font offset for
 // a given index; it returns -1 if the index is out of range. A regular .ttf
@@ -1018,7 +1022,7 @@ STT_DEF unsigned char * stt_GetCodepointSDF(const stt_fontinfo *info, float scal
 //             You have to have called stt_InitFont() first.
 
 
-STT_DEF int stt_FindMatchingFont(const unsigned char *fontdata, const char *name, int flags);
+STT_DEF int stt_FindMatchingFont(const unsigned char *fontdata, int fontdata_size, const char *name, int flags);
 // returns the offset (not index) of the font that matches, or -1 if none
 //   if you use STT_MACSTYLE_DONTCARE, use a font name like "Arial Bold".
 //   if you use any other flag, use a font name like "Arial"; this checks
@@ -1109,6 +1113,14 @@ enum { // languageID for STT_PLATFORM_ID_MAC
 #define STT_MAX_OVERSAMPLE   8
 #endif
 
+#ifndef STT_MAX_BITMAP_PIXELS
+#define STT_MAX_BITMAP_PIXELS 67108864
+#endif
+
+#ifndef STT_MAX_TESSELLATION_POINTS
+#define STT_MAX_TESSELLATION_POINTS 1048576
+#endif
+
 #if STT_MAX_OVERSAMPLE > 255
 #error "STT_MAX_OVERSAMPLE cannot be > 255"
 #endif
@@ -1152,14 +1164,19 @@ static void stt__buf_seek(stt__buf *b, int o)
 
 static void stt__buf_skip(stt__buf *b, int o)
 {
-   stt__buf_seek(b, b->cursor + o);
+   if (o > 0 && b->cursor > b->size - o)
+      b->cursor = b->size;
+   else if (o < 0 && o < -b->cursor)
+      b->cursor = 0;
+   else
+      stt__buf_seek(b, b->cursor + o);
 }
 
 static stt_uint32 stt__buf_get(stt__buf *b, int n)
 {
    stt_uint32 v = 0;
    int i;
-   STT_assert(n >= 1 && n <= 4);
+   if (n < 1 || n > 4) return 0;
    for (i = 0; i < n; i++)
       v = (v << 8) | stt__buf_get8(b);
    return v;
@@ -1168,7 +1185,7 @@ static stt_uint32 stt__buf_get(stt__buf *b, int n)
 static stt__buf stt__new_buf(const void *p, size_t size)
 {
    stt__buf r;
-   STT_assert(size < 0x40000000);
+   if (size > 0x3fffffff) size = 0;
    r.data = (stt_uint8*) p;
    r.size = (int) size;
    r.cursor = 0;
@@ -1194,9 +1211,19 @@ static stt__buf stt__cff_get_index(stt__buf *b)
    count = stt__buf_get16(b);
    if (count) {
       offsize = stt__buf_get8(b);
-      STT_assert(offsize >= 1 && offsize <= 4);
+      if (offsize < 1 || offsize > 4 || count > (b->size - b->cursor) / offsize) {
+         b->cursor = b->size;
+         return stt__buf_range(b, 0, 0);
+      }
       stt__buf_skip(b, offsize * count);
-      stt__buf_skip(b, stt__buf_get(b, offsize) - 1);
+      {
+         stt_uint32 final_offset = stt__buf_get(b, offsize);
+         if (final_offset == 0 || final_offset - 1 > (stt_uint32)(b->size - b->cursor)) {
+            b->cursor = b->size;
+            return stt__buf_range(b, 0, 0);
+         }
+         stt__buf_skip(b, (int)final_offset - 1);
+      }
    }
    return stt__buf_range(b, start, b->cursor - start);
 }
@@ -1263,12 +1290,15 @@ static stt__buf stt__cff_index_get(stt__buf b, int i)
    stt__buf_seek(&b, 0);
    count = stt__buf_get16(&b);
    offsize = stt__buf_get8(&b);
-   STT_assert(i >= 0 && i < count);
-   STT_assert(offsize >= 1 && offsize <= 4);
+   if (i < 0 || i >= count || offsize < 1 || offsize > 4 ||
+       count > (b.size - b.cursor) / offsize)
+      return stt__buf_range(&b, 0, 0);
    stt__buf_skip(&b, i*offsize);
    start = stt__buf_get(&b, offsize);
    end = stt__buf_get(&b, offsize);
-   return stt__buf_range(&b, 2+(count+1)*offsize+start, end - start);
+   if (start < 1 || end < start)
+      return stt__buf_range(&b, 0, 0);
+   return stt__buf_range(&b, 2+(count+1)*offsize+start, end-start);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1279,115 +1309,101 @@ static stt__buf stt__cff_index_get(stt__buf b, int i)
 // on platforms that don't allow misaligned reads, if we want to allow
 // truetype fonts that aren't padded to alignment, define ALLOW_UNALIGNED_TRUETYPE
 
-#define ttBYTE(p)     (* (stt_uint8 *) (p))
-#define ttCHAR(p)     (* (stt_int8 *) (p))
-#define ttFixed(p)    ttLONG(p)
-
-static stt_uint16 ttUSHORT(stt_uint8 *p) { return p[0]*256 + p[1]; }
-static stt_int16 ttSHORT(stt_uint8 *p)   { return p[0]*256 + p[1]; }
-static stt_uint32 ttULONG(stt_uint8 *p)  { return (p[0]<<24) + (p[1]<<16) + (p[2]<<8) + p[3]; }
-static stt_int32 ttLONG(stt_uint8 *p)    { return (p[0]<<24) + (p[1]<<16) + (p[2]<<8) + p[3]; }
-
 // Safe accessors with bounds checking
 static stt_uint8 stt__safe_read8(const stt_fontinfo *info, stt_uint32 offset)
 {
-   if (offset >= (stt_uint32)info->data_size) return 0;
+   if (!info || !info->data || info->data_size < 0 || offset >= (stt_uint32)info->data_size) return 0;
    return info->data[offset];
 }
 
 static stt_uint16 stt__safe_read16(const stt_fontinfo *info, stt_uint32 offset)
 {
-   if (offset + 1 >= (stt_uint32)info->data_size) return 0;
+   if (!info || !info->data || info->data_size < 2 || offset > (stt_uint32)info->data_size - 2) return 0;
    return (info->data[offset] << 8) | info->data[offset+1];
 }
 
 static stt_int16 stt__safe_read16_signed(const stt_fontinfo *info, stt_uint32 offset)
 {
-   if (offset + 1 >= (stt_uint32)info->data_size) return 0;
+   if (!info || !info->data || info->data_size < 2 || offset > (stt_uint32)info->data_size - 2) return 0;
    return (stt_int16)((info->data[offset] << 8) | info->data[offset+1]);
 }
 
 static stt_uint32 stt__safe_read32(const stt_fontinfo *info, stt_uint32 offset)
 {
-   if (offset + 3 >= (stt_uint32)info->data_size) return 0;
-   return (info->data[offset] << 24) | (info->data[offset+1] << 16) | 
-          (info->data[offset+2] << 8) | info->data[offset+3];
-}
-
-static stt_int32 stt__safe_read32_signed(const stt_fontinfo *info, stt_uint32 offset)
-{
-   if (offset + 3 >= (stt_uint32)info->data_size) return 0;
-   return (stt_int32)((info->data[offset] << 24) | (info->data[offset+1] << 16) | 
-                        (info->data[offset+2] << 8) | info->data[offset+3]);
-}
-
-// Safe pointer-based accessors for backward compatibility
-static stt_uint8 stt__safe_ttBYTE(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return stt__safe_read8(info, offset);
-}
-
-static stt_int8 stt__safe_ttCHAR(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return (stt_int8)stt__safe_read8(info, offset);
-}
-
-static stt_uint16 stt__safe_ttUSHORT(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return stt__safe_read16(info, offset);
-}
-
-static stt_int16 stt__safe_ttSHORT(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return stt__safe_read16_signed(info, offset);
-}
-
-static stt_uint32 stt__safe_ttULONG(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return stt__safe_read32(info, offset);
-}
-
-static stt_int32 stt__safe_ttLONG(const stt_fontinfo *info, const unsigned char *p)
-{
-   stt_uint32 offset = (stt_uint32)(p - info->data);
-   return stt__safe_read32_signed(info, offset);
+   if (!info || !info->data || info->data_size < 4 || offset > (stt_uint32)info->data_size - 4) return 0;
+   return ((stt_uint32)info->data[offset] << 24) |
+          ((stt_uint32)info->data[offset+1] << 16) |
+          ((stt_uint32)info->data[offset+2] << 8) |
+          info->data[offset+3];
 }
 
 static int stt__safe_check_bounds(const stt_fontinfo *info, stt_uint32 offset, int size)
 {
-   return offset + size <= (stt_uint32)info->data_size;
+   if (!info || !info->data || info->data_size < 0 || size < 0)
+      return 0;
+   return offset <= (stt_uint32)info->data_size &&
+          (stt_uint32)size <= (stt_uint32)info->data_size - offset;
 }
 
 #define stt_tag4(p,c0,c1,c2,c3) ((p)[0] == (c0) && (p)[1] == (c1) && (p)[2] == (c2) && (p)[3] == (c3))
 #define stt_tag(p,str)           stt_tag4(p,str[0],str[1],str[2],str[3])
 
-static int stt__isfont(stt_uint8 *font)
+static int stt__raw_check_bounds(const stt_uint8 *data, int data_size, stt_uint32 offset, stt_uint32 size)
+{
+   if (!data || data_size < 0 || offset > (stt_uint32)data_size)
+      return 0;
+   return size <= (stt_uint32)data_size - offset;
+}
+
+static stt_uint32 stt__raw_read32(const stt_uint8 *data, int data_size, stt_uint32 offset)
+{
+   if (!stt__raw_check_bounds(data, data_size, offset, 4)) return 0;
+   return ((stt_uint32)data[offset] << 24) |
+          ((stt_uint32)data[offset+1] << 16) |
+          ((stt_uint32)data[offset+2] << 8) | data[offset+3];
+}
+
+static int stt__raw_tag(const stt_uint8 *data, int data_size, stt_uint32 offset, const char *tag)
+{
+   return stt__raw_check_bounds(data, data_size, offset, 4) &&
+          data[offset] == (stt_uint8)tag[0] &&
+          data[offset+1] == (stt_uint8)tag[1] &&
+          data[offset+2] == (stt_uint8)tag[2] &&
+          data[offset+3] == (stt_uint8)tag[3];
+}
+
+static int stt__isfont(const stt_uint8 *font, int data_size)
 {
    // check the version number
-   if (stt_tag4(font, '1',0,0,0))  return 1; // TrueType 1
-   if (stt_tag(font, "typ1"))   return 1; // TrueType with type 1 font -- we don't support this!
-   if (stt_tag(font, "OTTO"))   return 1; // OpenType with CFF
-   if (stt_tag4(font, 0,1,0,0)) return 1; // OpenType 1.0
-   if (stt_tag(font, "true"))   return 1; // Apple specification for TrueType fonts
+   if (!stt__raw_check_bounds(font, data_size, 0, 4)) return 0;
+   if (font[0] == '1' && font[1] == 0 && font[2] == 0 && font[3] == 0) return 1;
+   if (stt__raw_tag(font, data_size, 0, "typ1")) return 1;
+   if (stt__raw_tag(font, data_size, 0, "OTTO")) return 1;
+   if (font[0] == 0 && font[1] == 1 && font[2] == 0 && font[3] == 0) return 1;
+   if (stt__raw_tag(font, data_size, 0, "true")) return 1;
    return 0;
 }
 
 // @OPTIMIZE: binary search
 static stt_uint32 stt__find_table(const stt_fontinfo *info, stt_uint32 fontstart, const char *tag)
 {
-   stt_int32 num_tables = stt__safe_read16(info, fontstart + 4);
-   stt_uint32 tabledir = fontstart + 12;
+   stt_int32 num_tables;
+   stt_uint32 tabledir;
    stt_int32 i;
+   if (!stt__safe_check_bounds(info, fontstart, 12)) return 0;
+   num_tables = stt__safe_read16(info, fontstart + 4);
+   tabledir = fontstart + 12;
+   if ((stt_uint32)num_tables > ((stt_uint32)info->data_size - tabledir) / 16) return 0;
    for (i=0; i < num_tables; ++i) {
       stt_uint32 loc = tabledir + 16*i;
-      if (!stt__safe_check_bounds(info, loc, 16)) return 0;
-      if (stt_tag(info->data+loc+0, tag))
-         return stt__safe_read32(info, loc + 8);
+      if (stt_tag(info->data+loc, tag)) {
+         stt_uint32 offset = stt__safe_read32(info, loc + 8);
+         stt_uint32 length = stt__safe_read32(info, loc + 12);
+         if (offset > (stt_uint32)info->data_size ||
+             length > (stt_uint32)info->data_size - offset)
+            return 0;
+         return offset;
+      }
    }
    return 0;
 }
@@ -1395,62 +1411,71 @@ static stt_uint32 stt__find_table(const stt_fontinfo *info, stt_uint32 fontstart
 // Get the size of a table
 static stt_uint32 stt__get_table_size(const stt_fontinfo *info, stt_uint32 fontstart, const char *tag)
 {
-   stt_int32 num_tables = stt__safe_read16(info, fontstart + 4);
-   stt_uint32 tabledir = fontstart + 12;
+   stt_int32 num_tables;
+   stt_uint32 tabledir;
    stt_int32 i;
+   if (!stt__safe_check_bounds(info, fontstart, 12)) return 0;
+   num_tables = stt__safe_read16(info, fontstart + 4);
+   tabledir = fontstart + 12;
+   if ((stt_uint32)num_tables > ((stt_uint32)info->data_size - tabledir) / 16) return 0;
    for (i=0; i < num_tables; ++i) {
       stt_uint32 loc = tabledir + 16*i;
-      if (!stt__safe_check_bounds(info, loc, 16)) return 0;
-      if (stt_tag(info->data+loc+0, tag))
-         return stt__safe_read32(info, loc + 12);  // length field is at offset 12
+      if (stt_tag(info->data+loc, tag)) {
+         stt_uint32 offset = stt__safe_read32(info, loc + 8);
+         stt_uint32 length = stt__safe_read32(info, loc + 12);
+         if (offset > (stt_uint32)info->data_size ||
+             length > (stt_uint32)info->data_size - offset)
+            return 0;
+         return length;
+      }
    }
    return 0;
 }
 
-// Raw data version for functions that don't have a stt_fontinfo
-static stt_uint32 stt__find_table_raw(stt_uint8 *data, stt_uint32 fontstart, const char *tag)
+static int stt_GetFontOffsetForIndex_internal(unsigned char *font_collection, int data_size, int index)
 {
-   stt_int32 num_tables = ttUSHORT(data+fontstart+4);
-   stt_uint32 tabledir = fontstart + 12;
-   stt_int32 i;
-   for (i=0; i < num_tables; ++i) {
-      stt_uint32 loc = tabledir + 16*i;
-      if (stt_tag(data+loc+0, tag))
-         return ttULONG(data+loc+8);
-   }
-   return 0;
-}
-
-static int stt_GetFontOffsetForIndex_internal(unsigned char *font_collection, int index)
-{
+   stt_uint32 version, n, offset;
+   if (index < 0 || data_size < 4) return -1;
    // if it's just a font, there's only one valid index
-   if (stt__isfont(font_collection))
+   if (stt__isfont(font_collection, data_size))
       return index == 0 ? 0 : -1;
 
    // check if it's a TTC
-   if (stt_tag(font_collection, "ttcf")) {
+   if (stt__raw_tag(font_collection, data_size, 0, "ttcf")) {
+      if (data_size < 12) return -1;
       // version 1?
-      if (ttULONG(font_collection+4) == 0x00010000 || ttULONG(font_collection+4) == 0x00020000) {
-         stt_int32 n = ttLONG(font_collection+8);
-         if (index >= n)
+      version = stt__raw_read32(font_collection, data_size, 4);
+      if (version == 0x00010000 || version == 0x00020000) {
+         n = stt__raw_read32(font_collection, data_size, 8);
+         if (n > ((stt_uint32)data_size - 12) / 4 || (stt_uint32)index >= n)
             return -1;
-         return ttULONG(font_collection+12+index*4);
+         offset = stt__raw_read32(font_collection, data_size, 12+(stt_uint32)index*4);
+         if (offset > (stt_uint32)data_size || !stt__isfont(font_collection+offset, data_size-(int)offset))
+            return -1;
+         return (int)offset;
       }
    }
    return -1;
 }
 
-static int stt_GetNumberOfFonts_internal(unsigned char *font_collection)
+static int stt_GetNumberOfFonts_internal(unsigned char *font_collection, int data_size)
 {
+   stt_uint32 version, n;
+   if (data_size < 4) return 0;
    // if it's just a font, there's only one valid font
-   if (stt__isfont(font_collection))
+   if (stt__isfont(font_collection, data_size))
       return 1;
 
    // check if it's a TTC
-   if (stt_tag(font_collection, "ttcf")) {
+   if (stt__raw_tag(font_collection, data_size, 0, "ttcf")) {
+      if (data_size < 12) return 0;
       // version 1?
-      if (ttULONG(font_collection+4) == 0x00010000 || ttULONG(font_collection+4) == 0x00020000) {
-         return ttLONG(font_collection+8);
+      version = stt__raw_read32(font_collection, data_size, 4);
+      if (version == 0x00010000 || version == 0x00020000) {
+         n = stt__raw_read32(font_collection, data_size, 8);
+         if (n > ((stt_uint32)data_size - 12) / 4 || n > 0x7fffffff)
+            return 0;
+         return (int)n;
       }
    }
    return 0;
@@ -1462,22 +1487,32 @@ static stt__buf stt__get_subrs(stt__buf cff, stt__buf fontdict)
    stt__buf pdict;
    stt__dict_get_ints(&fontdict, 18, 2, private_loc);
    if (!private_loc[1] || !private_loc[0]) return stt__new_buf(NULL, 0);
-   pdict = stt__buf_range(&cff, private_loc[1], private_loc[0]);
+   if (private_loc[1] > (stt_uint32)cff.size ||
+       private_loc[0] > (stt_uint32)cff.size-private_loc[1])
+      return stt__new_buf(NULL, 0);
+   pdict = stt__buf_range(&cff, (int)private_loc[1], (int)private_loc[0]);
    stt__dict_get_ints(&pdict, 19, 1, &subrsoff);
    if (!subrsoff) return stt__new_buf(NULL, 0);
-   stt__buf_seek(&cff, private_loc[1]+subrsoff);
+   if (subrsoff > (stt_uint32)cff.size-private_loc[1])
+      return stt__new_buf(NULL, 0);
+   stt__buf_seek(&cff, (int)(private_loc[1]+subrsoff));
    return stt__cff_get_index(&cff);
 }
 
 // since most people won't use this, find this table the first time it's needed
 static int stt__get_svg(stt_fontinfo *info)
 {
-   stt_uint32 t;
+   stt_uint32 t, size;
+   if (!info) return 0;
    if (info->svg < 0) {
       t = stt__find_table(info, info->fontstart, "SVG ");
       if (t) {
          stt_uint32 offset = stt__safe_read32(info, t + 2);
-         info->svg = t + offset;
+         size = stt__get_table_size(info, info->fontstart, "SVG ");
+         if (size >= 10 && offset <= size-2 && t <= 0x7fffffff-offset)
+            info->svg = (int)(t+offset);
+         else
+            info->svg = 0;
       } else {
          info->svg = 0;
       }
@@ -1487,9 +1522,15 @@ static int stt__get_svg(stt_fontinfo *info)
 
 static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int data_size, int fontstart)
 {
-   stt_uint32 cmap, t;
+   stt_uint32 cmap, cmap_size, t;
    stt_int32 i,numTables;
 
+   if (!info || !data || data_size < 12 || fontstart < 0 ||
+       fontstart > data_size - 12 ||
+       !stt__isfont(data + fontstart, data_size - fontstart))
+      return 0;
+
+   STT_memset(info, 0, sizeof(*info));
    info->data = data;
    info->data_size = data_size;
    info->fontstart = fontstart;
@@ -1504,11 +1545,16 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
    info->kern = stt__find_table(info, fontstart, "kern"); // not required
    info->gpos = stt__find_table(info, fontstart, "GPOS"); // not required
 
-   if (!cmap || !info->head || !info->hhea || !info->hmtx)
+   cmap_size = stt__get_table_size(info, fontstart, "cmap");
+   if (!cmap || cmap_size < 4 || !info->head ||
+       stt__get_table_size(info, fontstart, "head") < 54 ||
+       !info->hhea || stt__get_table_size(info, fontstart, "hhea") < 36 ||
+       !info->hmtx || stt__get_table_size(info, fontstart, "hmtx") < 4)
       return 0;
    if (info->glyf) {
       // required for truetype
-      if (!info->loca) return 0;
+      if (!info->loca || stt__get_table_size(info, fontstart, "loca") < 4)
+         return 0;
    } else {
       // initialization for CFF / Type2 fonts (OTF)
       stt__buf b, topdict, topdictidx;
@@ -1523,7 +1569,8 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
 
       // Use actual table size instead of hardcoded 512MB
       stt_uint32 cff_size = stt__get_table_size(info, fontstart, "CFF ");
-      if (cff_size == 0 || cff + cff_size > (stt_uint32)info->data_size) return 0;
+      if (cff_size == 0 || cff > (stt_uint32)info->data_size ||
+          cff_size > (stt_uint32)info->data_size - cff) return 0;
       info->cff = stt__new_buf(data+cff, cff_size);
       b = info->cff;
 
@@ -1552,19 +1599,26 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
       if (fdarrayoff) {
          // looks like a CID font
          if (!fdselectoff) return 0;
-         stt__buf_seek(&b, fdarrayoff);
+         if (fdarrayoff > (stt_uint32)b.size ||
+             fdselectoff > (stt_uint32)b.size) return 0;
+         stt__buf_seek(&b, (int)fdarrayoff);
          info->fontdicts = stt__cff_get_index(&b);
-         info->fdselect = stt__buf_range(&b, fdselectoff, b.size-fdselectoff);
+         info->fdselect = stt__buf_range(&b, (int)fdselectoff,
+                                         b.size-(int)fdselectoff);
       }
 
-      stt__buf_seek(&b, charstrings);
+      if (charstrings > (stt_uint32)b.size) return 0;
+      stt__buf_seek(&b, (int)charstrings);
       info->charstrings = stt__cff_get_index(&b);
+      if (!info->charstrings.size) return 0;
    }
 
    t = stt__find_table(info, fontstart, "maxp");
-   if (t)
+   if (t) {
+      if (stt__get_table_size(info, fontstart, "maxp") < 6) return 0;
       info->numGlyphs = stt__safe_read16(info, t+4);
-   else
+      if (!info->numGlyphs) return 0;
+   } else
       info->numGlyphs = 0xffff;
 
    info->svg = -1;
@@ -1573,10 +1627,13 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
    // later. (todo: could make this installable)
    // the same regardless of glyph.
    numTables = stt__safe_read16(info, cmap + 2);
+   if ((stt_uint32)numTables > (cmap_size - 4) / 8)
+      return 0;
    info->index_map = 0;
    for (i=0; i < numTables; ++i) {
       stt_uint32 encoding_record = cmap + 4 + 8 * i;
-      if (!stt__safe_check_bounds(info, encoding_record, 8)) break;
+      if (encoding_record < cmap || encoding_record > cmap + cmap_size - 8)
+         break;
       // find an encoding we understand:
       switch(stt__safe_read16(info, encoding_record)) {
          case STT_PLATFORM_ID_MICROSOFT:
@@ -1584,19 +1641,42 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
                case STT_MS_EID_UNICODE_BMP:
                case STT_MS_EID_UNICODE_FULL:
                   // MS/Unicode
-                  info->index_map = cmap + stt__safe_read32(info, encoding_record+4);
+                  t = stt__safe_read32(info, encoding_record+4);
+                  if (t < cmap_size)
+                     info->index_map = cmap + t;
                   break;
             }
             break;
         case STT_PLATFORM_ID_UNICODE:
             // Mac/iOS has these
             // all the encodingIDs are unicode, so we don't bother to check it
-            info->index_map = cmap + stt__safe_read32(info, encoding_record+4);
+            t = stt__safe_read32(info, encoding_record+4);
+            if (t < cmap_size)
+               info->index_map = cmap + t;
             break;
       }
    }
-   if (info->index_map == 0)
+   if (info->index_map == 0 ||
+       (stt_uint32)info->index_map > cmap + cmap_size - 2)
       return 0;
+   {
+      stt_uint32 cmap_relative = (stt_uint32)info->index_map-cmap;
+      stt_uint32 cmap_available = cmap_size-cmap_relative;
+      stt_uint16 format = stt__safe_read16(info, (stt_uint32)info->index_map);
+      stt_uint32 subtable_length;
+      if (format == 0 || format == 4 || format == 6) {
+         if (cmap_available < 4) return 0;
+         subtable_length = stt__safe_read16(info,
+                                            (stt_uint32)info->index_map+2);
+      } else if (format == 12 || format == 13) {
+         if (cmap_available < 8) return 0;
+         subtable_length = stt__safe_read32(info,
+                                            (stt_uint32)info->index_map+4);
+      } else {
+         return 0;
+      }
+      if (subtable_length < 4 || subtable_length > cmap_available) return 0;
+   }
 
    info->indexToLocFormat = stt__safe_read16(info, info->head + 50);
    return 1;
@@ -1604,94 +1684,117 @@ static int stt_InitFont_internal(stt_fontinfo *info, unsigned char *data, int da
 
 STT_DEF int stt_FindGlyphIndex(const stt_fontinfo *info, int unicode_codepoint)
 {
-   stt_uint8 *data = info->data;
-   stt_uint32 index_map = info->index_map;
+   stt_uint32 index_map, available, length;
+   stt_uint16 format;
 
-   stt_uint16 format = stt__safe_read16(info, index_map + 0);
-   if (format == 0) { // apple byte encoding
-      stt_int32 bytes = stt__safe_read16(info, index_map + 2);
-      if (unicode_codepoint < bytes-6)
-         return stt__safe_read8(info, index_map + 6 + unicode_codepoint);
+   if (!info || unicode_codepoint < 0 || info->index_map < 0 ||
+       !stt__safe_check_bounds(info, (stt_uint32)info->index_map, 2))
       return 0;
-   } else if (format == 6) {
-      stt_uint32 first = stt__safe_read16(info, index_map + 6);
-      stt_uint32 count = stt__safe_read16(info, index_map + 8);
-      if ((stt_uint32) unicode_codepoint >= first && (stt_uint32) unicode_codepoint < first+count)
-         return stt__safe_read16(info, index_map + 10 + (unicode_codepoint - first)*2);
-      return 0;
-   } else if (format == 2) {
-      STT_assert(0); // @TODO: high-byte mapping for japanese/chinese/korean
-      return 0;
-   } else if (format == 4) { // standard mapping for windows fonts: binary search collection of ranges
-      stt_uint16 segcount = stt__safe_read16(info, index_map+6) >> 1;
-      stt_uint16 searchRange = stt__safe_read16(info, index_map+8) >> 1;
-      stt_uint16 entrySelector = stt__safe_read16(info, index_map+10);
-      stt_uint16 rangeShift = stt__safe_read16(info, index_map+12) >> 1;
+   index_map = (stt_uint32)info->index_map;
+   available = (stt_uint32)info->data_size - index_map;
+   format = stt__safe_read16(info, index_map);
 
-      // do a binary search of the segments
-      stt_uint32 endCount = index_map + 14;
-      stt_uint32 search = endCount;
-
-      if (unicode_codepoint > 0xffff)
+   if (format == 0) {
+      if (available < 6) return 0;
+      length = stt__safe_read16(info, index_map+2);
+      if (length < 6 || length > available || (stt_uint32)unicode_codepoint >= length-6)
          return 0;
+      return stt__safe_read8(info, index_map+6+(stt_uint32)unicode_codepoint);
+   }
 
-      // they lie from endCount .. endCount + segCount
-      // but searchRange is the nearest power of two, so...
-      if (unicode_codepoint >= stt__safe_read16(info, search + rangeShift*2))
-         search += rangeShift*2;
+   if (format == 6) {
+      stt_uint32 first, count;
+      if (available < 10) return 0;
+      length = stt__safe_read16(info, index_map+2);
+      first = stt__safe_read16(info, index_map+6);
+      count = stt__safe_read16(info, index_map+8);
+      if (length < 10 || length > available || count > (length-10)/2 ||
+          (stt_uint32)unicode_codepoint < first ||
+          (stt_uint32)unicode_codepoint-first >= count)
+         return 0;
+      return stt__safe_read16(info, index_map+10+
+                              ((stt_uint32)unicode_codepoint-first)*2);
+   }
 
-      // now decrement to bias correctly to find smallest
-      search -= 2;
-      while (entrySelector) {
-         stt_uint16 end;
-         searchRange >>= 1;
-         end = stt__safe_read16(info, search + searchRange*2);
-         if (unicode_codepoint > end)
-            search += searchRange*2;
-         --entrySelector;
-      }
-      search += 2;
+   if (format == 4) {
+      stt_uint32 segcount, low, high, item;
+      stt_uint32 end_base, start_base, delta_base, range_base;
+      stt_uint16 start, end, range_offset, glyph;
+      stt_int16 delta;
+      if (available < 16 || unicode_codepoint > 0xffff) return 0;
+      length = stt__safe_read16(info, index_map+2);
+      segcount = stt__safe_read16(info, index_map+6) >> 1;
+      if (length < 16 || length > available || !segcount ||
+          segcount > (length-16)/8)
+         return 0;
+      end_base = index_map+14;
+      start_base = end_base+2*segcount+2;
+      delta_base = start_base+2*segcount;
+      range_base = delta_base+2*segcount;
 
-      {
-         stt_uint16 offset, start, last;
-         stt_uint16 item = (stt_uint16) ((search - endCount) >> 1);
-
-         start = stt__safe_read16(info, index_map + 14 + segcount*2 + 2 + 2*item);
-         last = stt__safe_read16(info, endCount + 2*item);
-         if (unicode_codepoint < start || unicode_codepoint > last)
-            return 0;
-
-         offset = stt__safe_read16(info, index_map + 14 + segcount*6 + 2 + 2*item);
-         if (offset == 0)
-            return (stt_uint16) (unicode_codepoint + stt__safe_read16_signed(info, index_map + 14 + segcount*4 + 2 + 2*item));
-
-         return stt__safe_read16(info, offset + (unicode_codepoint-start)*2 + index_map + 14 + segcount*6 + 2 + 2*item);
-      }
-   } else if (format == 12 || format == 13) {
-      stt_uint32 ngroups = stt__safe_read32(info, index_map+12);
-      stt_int32 low,high;
-      low = 0; high = (stt_int32)ngroups;
-      // Binary search the right group.
+      low = 0;
+      high = segcount;
       while (low < high) {
-         stt_int32 mid = low + ((high-low) >> 1); // rounds down, so low <= mid < high
-         stt_uint32 start_char = stt__safe_read32(info, index_map+16+mid*12);
-         stt_uint32 end_char = stt__safe_read32(info, index_map+16+mid*12+4);
-         if ((stt_uint32) unicode_codepoint < start_char)
+         stt_uint32 mid = low+(high-low)/2;
+         end = stt__safe_read16(info, end_base+2*mid);
+         if ((stt_uint32)unicode_codepoint > end)
+            low = mid+1;
+         else
             high = mid;
-         else if ((stt_uint32) unicode_codepoint > end_char)
+      }
+      if (low >= segcount) return 0;
+      item = low;
+      start = stt__safe_read16(info, start_base+2*item);
+      end = stt__safe_read16(info, end_base+2*item);
+      if ((stt_uint32)unicode_codepoint < start ||
+          (stt_uint32)unicode_codepoint > end)
+         return 0;
+      delta = stt__safe_read16_signed(info, delta_base+2*item);
+      range_offset = stt__safe_read16(info, range_base+2*item);
+      if (!range_offset)
+         return (stt_uint16)(unicode_codepoint+delta);
+      {
+         stt_uint32 range_word = range_base+2*item;
+         stt_uint32 delta_words = (stt_uint32)unicode_codepoint-start;
+         stt_uint32 table_end = index_map+length;
+         stt_uint32 glyph_word;
+         if (range_offset > table_end-range_word)
+            return 0;
+         glyph_word = range_word+range_offset;
+         if (glyph_word > table_end || table_end-glyph_word < 2 ||
+             delta_words > (table_end-glyph_word-2)/2)
+            return 0;
+         glyph = stt__safe_read16(info, glyph_word+2*delta_words);
+      }
+      return glyph ? (stt_uint16)(glyph+delta) : 0;
+   }
+
+   if (format == 12 || format == 13) {
+      stt_uint32 ngroups, low, high;
+      if (available < 16) return 0;
+      length = stt__safe_read32(info, index_map+4);
+      ngroups = stt__safe_read32(info, index_map+12);
+      if (length < 16 || length > available || ngroups > (length-16)/12)
+         return 0;
+      low = 0;
+      high = ngroups;
+      while (low < high) {
+         stt_uint32 mid = low+(high-low)/2;
+         stt_uint32 group = index_map+16+mid*12;
+         stt_uint32 start_char = stt__safe_read32(info, group);
+         stt_uint32 end_char = stt__safe_read32(info, group+4);
+         if ((stt_uint32)unicode_codepoint < start_char)
+            high = mid;
+         else if ((stt_uint32)unicode_codepoint > end_char)
             low = mid+1;
          else {
-            stt_uint32 start_glyph = stt__safe_read32(info, index_map+16+mid*12+8);
-            if (format == 12)
-               return start_glyph + unicode_codepoint-start_char;
-            else // format == 13
-               return start_glyph;
+            stt_uint32 start_glyph = stt__safe_read32(info, group+8);
+            stt_uint32 glyph = format == 12 ?
+               start_glyph+(stt_uint32)unicode_codepoint-start_char : start_glyph;
+            return glyph < (stt_uint32)info->numGlyphs ? (int)glyph : 0;
          }
       }
-      return 0; // not found
    }
-   // @TODO
-   STT_assert(0);
    return 0;
 }
 
@@ -1709,35 +1812,54 @@ static void stt_setvertex(stt_vertex *v, stt_uint8 type, stt_int32 x, stt_int32 
    v->cy = (stt_int16) cy;
 }
 
-static int stt__GetGlyfOffset(const stt_fontinfo *info, int glyph_index)
+static int stt__GetGlyfOffset(const stt_fontinfo *info, int glyph_index,
+                              stt_uint32 *glyph_size)
 {
-   int g1,g2;
+   stt_uint32 g1,g2, loca_size, glyf_size, entry;
 
-   STT_assert(!info->cff.size);
+   if (glyph_size) *glyph_size = 0;
+   if (!info || info->cff.size || glyph_index < 0 ||
+       glyph_index >= info->numGlyphs) return -1;
 
-   if (glyph_index >= info->numGlyphs) return -1; // glyph index out of range
    if (info->indexToLocFormat >= 2)    return -1; // unknown index->glyph map format
+   loca_size = stt__get_table_size(info, info->fontstart, "loca");
+   glyf_size = stt__get_table_size(info, info->fontstart, "glyf");
+   if (!loca_size || !glyf_size) return -1;
 
    if (info->indexToLocFormat == 0) {
-      g1 = info->glyf + stt__safe_read16(info, info->loca + glyph_index * 2) * 2;
-      g2 = info->glyf + stt__safe_read16(info, info->loca + glyph_index * 2 + 2) * 2;
+      entry = (stt_uint32)glyph_index * 2;
+      if (entry > loca_size || loca_size-entry < 4) return -1;
+      g1 = (stt_uint32)stt__safe_read16(info, info->loca+entry) * 2;
+      g2 = (stt_uint32)stt__safe_read16(info, info->loca+entry+2) * 2;
    } else {
-      g1 = info->glyf + stt__safe_read32(info, info->loca + glyph_index * 4);
-      g2 = info->glyf + stt__safe_read32(info, info->loca + glyph_index * 4 + 4);
+      entry = (stt_uint32)glyph_index * 4;
+      if (entry > loca_size || loca_size-entry < 8) return -1;
+      g1 = stt__safe_read32(info, info->loca+entry);
+      g2 = stt__safe_read32(info, info->loca+entry+4);
    }
 
-   return g1==g2 ? -1 : g1; // if length is 0, return -1
+   if (g1 >= g2 || g2 > glyf_size ||
+       g1 > (stt_uint32)info->data_size-(stt_uint32)info->glyf)
+      return -1;
+   if (glyph_size) *glyph_size = g2-g1;
+   return info->glyf <= 0x7fffffff-(int)g1 ? info->glyf+(int)g1 : -1;
 }
 
 static int stt__GetGlyphInfoT2(const stt_fontinfo *info, int glyph_index, int *x0, int *y0, int *x1, int *y1);
 
 STT_DEF int stt_GetGlyphBox(const stt_fontinfo *info, int glyph_index, int *x0, int *y0, int *x1, int *y1)
 {
+   if (x0) *x0 = 0;
+   if (y0) *y0 = 0;
+   if (x1) *x1 = 0;
+   if (y1) *y1 = 0;
+   if (!info || glyph_index < 0 || glyph_index >= info->numGlyphs) return 0;
    if (info->cff.size) {
-      stt__GetGlyphInfoT2(info, glyph_index, x0, y0, x1, y1);
+      return stt__GetGlyphInfoT2(info, glyph_index, x0, y0, x1, y1) != 0;
    } else {
-      int g = stt__GetGlyfOffset(info, glyph_index);
-      if (g < 0) return 0;
+      stt_uint32 glyph_size;
+      int g = stt__GetGlyfOffset(info, glyph_index, &glyph_size);
+      if (g < 0 || glyph_size < 10) return 0;
 
       if (x0) *x0 = stt__safe_read16_signed(info, g + 2);
       if (y0) *y0 = stt__safe_read16_signed(info, g + 4);
@@ -1756,11 +1878,15 @@ STT_DEF int stt_IsGlyphEmpty(const stt_fontinfo *info, int glyph_index)
 {
    stt_int16 numberOfContours;
    int g;
+   if (!info || glyph_index < 0 || glyph_index >= info->numGlyphs) return 1;
    if (info->cff.size)
       return stt__GetGlyphInfoT2(info, glyph_index, NULL, NULL, NULL, NULL) == 0;
-   g = stt__GetGlyfOffset(info, glyph_index);
-   if (g < 0) return 1;
-   numberOfContours = ttSHORT(info->data + g);
+   {
+      stt_uint32 glyph_size;
+      g = stt__GetGlyfOffset(info, glyph_index, &glyph_size);
+      if (g < 0 || glyph_size < 2) return 1;
+   }
+   numberOfContours = stt__safe_read16_signed(info, (stt_uint32)g);
    return numberOfContours == 0;
 }
 
@@ -1780,227 +1906,267 @@ static int stt__close_shape(stt_vertex *vertices, int num_vertices, int was_off,
    return num_vertices;
 }
 
-static int stt__GetGlyphShapeTT(const stt_fontinfo *info, int glyph_index, stt_vertex **pvertices)
+#define STT_MAX_COMPOSITE_DEPTH 32
+
+static int stt__GetGlyphShapeTT(const stt_fontinfo *info, int glyph_index,
+                                stt_vertex **pvertices, int depth)
 {
    stt_int16 numberOfContours;
-   stt_uint8 *endPtsOfContours;
-   stt_uint8 *data = info->data;
-   stt_vertex *vertices=0;
-   int num_vertices=0;
-   int g = stt__GetGlyfOffset(info, glyph_index);
+   stt_vertex *vertices = NULL;
+   stt_uint32 glyph_size, glyph_end;
+   int num_vertices = 0;
+   int g;
 
+   if (!pvertices) return 0;
    *pvertices = NULL;
-
-   if (g < 0) return 0;
-
-   numberOfContours = ttSHORT(data + g);
+   if (depth > STT_MAX_COMPOSITE_DEPTH) return 0;
+   g = stt__GetGlyfOffset(info, glyph_index, &glyph_size);
+   if (g < 0 || glyph_size < 2) return 0;
+   glyph_end = (stt_uint32)g + glyph_size;
+   numberOfContours = stt__safe_read16_signed(info, (stt_uint32)g);
 
    if (numberOfContours > 0) {
-      stt_uint8 flags=0,flagcount;
-      stt_int32 ins, i,j=0,m,n, next_move, was_off=0, off, start_off=0;
-      stt_int32 x,y,cx,cy,sx,sy, scx,scy;
-      stt_uint8 *points;
-      endPtsOfContours = (data + g + 10);
-      ins = ttUSHORT(data + g + 10 + numberOfContours * 2);
-      points = data + g + 10 + numberOfContours * 2 + 2 + ins;
+      stt_uint8 flags = 0, flagcount = 0;
+      stt_int32 i, j, m, n, next_move, was_off = 0, off, start_off = 0;
+      stt_int32 x, y, cx, cy, sx, sy, scx, scy;
+      stt_uint32 end_pts, ins_offset, points, previous_end = 0;
 
-      n = 1+ttUSHORT(endPtsOfContours + numberOfContours*2-2);
+      if (glyph_size < 12+(stt_uint32)numberOfContours*2) return 0;
+      end_pts = (stt_uint32)g+10;
+      for (j=0; j<numberOfContours; ++j) {
+         stt_uint32 endpoint = stt__safe_read16(info, end_pts+(stt_uint32)j*2);
+         if (j && endpoint <= previous_end) return 0;
+         previous_end = endpoint;
+      }
+      n = (stt_int32)previous_end+1;
+      if (n <= 0) return 0;
+      ins_offset = end_pts+(stt_uint32)numberOfContours*2;
+      if (ins_offset > glyph_end || glyph_end-ins_offset < 2) return 0;
+      {
+         stt_uint32 ins = stt__safe_read16(info, ins_offset);
+         if (ins > glyph_end-ins_offset-2) return 0;
+         points = ins_offset+2+ins;
+      }
 
-      m = n + 2*numberOfContours;  // a loose bound on how many vertices we might need
-      vertices = (stt_vertex *) STT_malloc(m * sizeof(vertices[0]), info->userdata);
-      if (vertices == 0)
-         return 0;
+      m = n+2*(stt_int32)numberOfContours;
+      if (m < n || (size_t)m > ((size_t)-1)/sizeof(vertices[0])) return 0;
+      vertices = (stt_vertex *)STT_malloc((size_t)m*sizeof(vertices[0]),
+                                          info->userdata);
+      if (!vertices) return 0;
+      off = m-n;
 
-      next_move = 0;
-      flagcount=0;
-
-      // in first pass, we load uninterpreted data into the allocated array
-      // above, shifted to the end of the array so we won't overwrite it when
-      // we create our final data starting from the front
-
-      off = m - n; // starting offset for uninterpreted data, regardless of how m ends up being calculated
-
-      // first load flags
-
-      for (i=0; i < n; ++i) {
-         if (flagcount == 0) {
-            flags = *points++;
-            if (flags & 8)
-               flagcount = *points++;
-         } else
+      for (i=0; i<n; ++i) {
+         if (!flagcount) {
+            if (points >= glyph_end) goto malformed;
+            flags = stt__safe_read8(info, points++);
+            if (flags & 8) {
+               if (points >= glyph_end) goto malformed;
+               flagcount = stt__safe_read8(info, points++);
+               if ((stt_int32)flagcount > n-i-1) goto malformed;
+            }
+         } else {
             --flagcount;
+         }
          vertices[off+i].type = flags;
       }
 
-      // now load x coordinates
-      x=0;
-      for (i=0; i < n; ++i) {
-         flags = vertices[off+i].type;
+      x = 0;
+      for (i=0; i<n; ++i) {
+         stt_int32 dx = 0;
+         flags = (stt_uint8)vertices[off+i].type;
          if (flags & 2) {
-            stt_int16 dx = *points++;
-            x += (flags & 16) ? dx : -dx; // ???
-         } else {
-            if (!(flags & 16)) {
-               x = x + (stt_int16) (points[0]*256 + points[1]);
-               points += 2;
-            }
+            if (points >= glyph_end) goto malformed;
+            dx = stt__safe_read8(info, points++);
+            if (!(flags & 16)) dx = -dx;
+         } else if (!(flags & 16)) {
+            if (points > glyph_end || glyph_end-points < 2) goto malformed;
+            dx = stt__safe_read16_signed(info, points);
+            points += 2;
          }
-         vertices[off+i].x = (stt_int16) x;
+         if ((dx > 0 && x > 2147483647-dx) ||
+             (dx < 0 && x < (-2147483647-1)-dx)) goto malformed;
+         x += dx;
+         vertices[off+i].x = (stt_vertex_type)x;
       }
 
-      // now load y coordinates
-      y=0;
-      for (i=0; i < n; ++i) {
-         flags = vertices[off+i].type;
+      y = 0;
+      for (i=0; i<n; ++i) {
+         stt_int32 dy = 0;
+         flags = (stt_uint8)vertices[off+i].type;
          if (flags & 4) {
-            stt_int16 dy = *points++;
-            y += (flags & 32) ? dy : -dy; // ???
-         } else {
-            if (!(flags & 32)) {
-               y = y + (stt_int16) (points[0]*256 + points[1]);
-               points += 2;
-            }
+            if (points >= glyph_end) goto malformed;
+            dy = stt__safe_read8(info, points++);
+            if (!(flags & 32)) dy = -dy;
+         } else if (!(flags & 32)) {
+            if (points > glyph_end || glyph_end-points < 2) goto malformed;
+            dy = stt__safe_read16_signed(info, points);
+            points += 2;
          }
-         vertices[off+i].y = (stt_int16) y;
+         if ((dy > 0 && y > 2147483647-dy) ||
+             (dy < 0 && y < (-2147483647-1)-dy)) goto malformed;
+         y += dy;
+         vertices[off+i].y = (stt_vertex_type)y;
       }
 
-      // now convert them to our format
-      num_vertices=0;
+      next_move = 0;
+      j = 0;
       sx = sy = cx = cy = scx = scy = 0;
-      for (i=0; i < n; ++i) {
-         flags = vertices[off+i].type;
-         x     = (stt_int16) vertices[off+i].x;
-         y     = (stt_int16) vertices[off+i].y;
+      for (i=0; i<n; ++i) {
+         flags = (stt_uint8)vertices[off+i].type;
+         x = vertices[off+i].x;
+         y = vertices[off+i].y;
 
          if (next_move == i) {
-            if (i != 0)
-               num_vertices = stt__close_shape(vertices, num_vertices, was_off, start_off, sx,sy,scx,scy,cx,cy);
+            stt_int32 contour_start = i;
+            stt_int32 contour_end;
+            stt_int32 next_i;
+            if (j >= numberOfContours) goto malformed;
+            contour_end = stt__safe_read16(info, end_pts+(stt_uint32)j*2);
+            if (contour_end < contour_start || contour_end >= n) goto malformed;
+            if (i)
+               num_vertices = stt__close_shape(vertices, num_vertices,
+                  was_off, start_off, sx, sy, scx, scy, cx, cy);
 
-            // now start the new one
             start_off = !(flags & 1);
             if (start_off) {
-               // if we start off with an off-curve point, then when we need to find a point on the curve
-               // where we can start, and we need to save some state for when we wraparound.
                scx = x;
                scy = y;
-               if (!(vertices[off+i+1].type & 1)) {
-                  // next point is also a curve point, so interpolate an on-point curve
-                  sx = (x + (stt_int32) vertices[off+i+1].x) >> 1;
-                  sy = (y + (stt_int32) vertices[off+i+1].y) >> 1;
+               next_i = i < contour_end ? i+1 : contour_start;
+               if (!(vertices[off+next_i].type & 1)) {
+                  sx = (x+(stt_int32)vertices[off+next_i].x) >> 1;
+                  sy = (y+(stt_int32)vertices[off+next_i].y) >> 1;
                } else {
-                  // otherwise just use the next point as our start point
-                  sx = (stt_int32) vertices[off+i+1].x;
-                  sy = (stt_int32) vertices[off+i+1].y;
-                  ++i; // we're using point i+1 as the starting point, so skip it
+                  sx = vertices[off+next_i].x;
+                  sy = vertices[off+next_i].y;
+                  if (next_i != contour_start) ++i;
                }
             } else {
                sx = x;
                sy = y;
             }
-            stt_setvertex(&vertices[num_vertices++], STT_vmove,sx,sy,0,0);
+            stt_setvertex(&vertices[num_vertices++], STT_vmove, sx, sy, 0, 0);
             was_off = 0;
-            next_move = 1 + ttUSHORT(endPtsOfContours+j*2);
+            next_move = contour_end+1;
             ++j;
+         } else if (!(flags & 1)) {
+            if (was_off)
+               stt_setvertex(&vertices[num_vertices++], STT_vcurve,
+                             (cx+x)>>1, (cy+y)>>1, cx, cy);
+            cx = x;
+            cy = y;
+            was_off = 1;
          } else {
-            if (!(flags & 1)) { // if it's a curve
-               if (was_off) // two off-curve control points in a row means interpolate an on-curve midpoint
-                  stt_setvertex(&vertices[num_vertices++], STT_vcurve, (cx+x)>>1, (cy+y)>>1, cx, cy);
-               cx = x;
-               cy = y;
-               was_off = 1;
-            } else {
-               if (was_off)
-                  stt_setvertex(&vertices[num_vertices++], STT_vcurve, x,y, cx, cy);
-               else
-                  stt_setvertex(&vertices[num_vertices++], STT_vline, x,y,0,0);
-               was_off = 0;
-            }
+            if (was_off)
+               stt_setvertex(&vertices[num_vertices++], STT_vcurve,
+                             x, y, cx, cy);
+            else
+               stt_setvertex(&vertices[num_vertices++], STT_vline,
+                             x, y, 0, 0);
+            was_off = 0;
          }
       }
-      num_vertices = stt__close_shape(vertices, num_vertices, was_off, start_off, sx,sy,scx,scy,cx,cy);
+      if (j != numberOfContours) goto malformed;
+      num_vertices = stt__close_shape(vertices, num_vertices, was_off,
+                                      start_off, sx, sy, scx, scy, cx, cy);
    } else if (numberOfContours < 0) {
-      // Compound shapes.
-      int more = 1;
-      stt_uint8 *comp = data + g + 10;
-      num_vertices = 0;
-      vertices = 0;
+      stt_uint32 comp = (stt_uint32)g+10;
+      int more = 1, component_count = 0;
+
+      if (glyph_size < 14) return 0;
       while (more) {
          stt_uint16 flags, gidx;
-         int comp_num_verts = 0, i;
-         stt_vertex *comp_verts = 0, *tmp = 0;
+         int comp_num_verts, i;
+         stt_vertex *comp_verts = NULL, *tmp;
          float mtx[6] = {1,0,0,1,0,0}, m, n;
 
-         flags = ttSHORT(comp); comp+=2;
-         gidx = ttSHORT(comp); comp+=2;
+         if (++component_count > (int)(glyph_size/4) ||
+             comp > glyph_end || glyph_end-comp < 4) goto malformed;
+         flags = stt__safe_read16(info, comp); comp += 2;
+         gidx = stt__safe_read16(info, comp); comp += 2;
 
-         if (flags & 2) { // XY values
-            if (flags & 1) { // shorts
-               mtx[4] = ttSHORT(comp); comp+=2;
-               mtx[5] = ttSHORT(comp); comp+=2;
-            } else {
-               mtx[4] = ttCHAR(comp); comp+=1;
-               mtx[5] = ttCHAR(comp); comp+=1;
-            }
+         if (!(flags & 2)) goto malformed; /* point matching unsupported */
+         if (flags & 1) {
+            if (comp > glyph_end || glyph_end-comp < 4) goto malformed;
+            mtx[4] = stt__safe_read16_signed(info, comp); comp += 2;
+            mtx[5] = stt__safe_read16_signed(info, comp); comp += 2;
+         } else {
+            if (comp > glyph_end || glyph_end-comp < 2) goto malformed;
+            mtx[4] = (stt_int8)stt__safe_read8(info, comp++);
+            mtx[5] = (stt_int8)stt__safe_read8(info, comp++);
          }
-         else {
-            // @TODO handle matching point
-            STT_assert(0);
-         }
-         if (flags & (1<<3)) { // WE_HAVE_A_SCALE
-            mtx[0] = mtx[3] = ttSHORT(comp)/16384.0f; comp+=2;
-            mtx[1] = mtx[2] = 0;
-         } else if (flags & (1<<6)) { // WE_HAVE_AN_X_AND_YSCALE
-            mtx[0] = ttSHORT(comp)/16384.0f; comp+=2;
-            mtx[1] = mtx[2] = 0;
-            mtx[3] = ttSHORT(comp)/16384.0f; comp+=2;
-         } else if (flags & (1<<7)) { // WE_HAVE_A_TWO_BY_TWO
-            mtx[0] = ttSHORT(comp)/16384.0f; comp+=2;
-            mtx[1] = ttSHORT(comp)/16384.0f; comp+=2;
-            mtx[2] = ttSHORT(comp)/16384.0f; comp+=2;
-            mtx[3] = ttSHORT(comp)/16384.0f; comp+=2;
+         if (flags & (1<<3)) {
+            if (comp > glyph_end || glyph_end-comp < 2) goto malformed;
+            mtx[0] = mtx[3] = stt__safe_read16_signed(info, comp)/16384.0f;
+            comp += 2;
+         } else if (flags & (1<<6)) {
+            if (comp > glyph_end || glyph_end-comp < 4) goto malformed;
+            mtx[0] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
+            mtx[3] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
+         } else if (flags & (1<<7)) {
+            if (comp > glyph_end || glyph_end-comp < 8) goto malformed;
+            mtx[0] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
+            mtx[1] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
+            mtx[2] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
+            mtx[3] = stt__safe_read16_signed(info, comp)/16384.0f; comp += 2;
          }
 
-         // Find transformation scales.
-         m = (float) STT_sqrt(mtx[0]*mtx[0] + mtx[1]*mtx[1]);
-         n = (float) STT_sqrt(mtx[2]*mtx[2] + mtx[3]*mtx[3]);
-
-         // Get indexed glyph.
-         comp_num_verts = stt_GetGlyphShape(info, gidx, &comp_verts);
+         m = (float)STT_sqrt(mtx[0]*mtx[0]+mtx[1]*mtx[1]);
+         n = (float)STT_sqrt(mtx[2]*mtx[2]+mtx[3]*mtx[3]);
+         comp_num_verts = stt__GetGlyphShapeTT(info, gidx, &comp_verts,
+                                               depth+1);
          if (comp_num_verts > 0) {
-            // Transform vertices.
-            for (i = 0; i < comp_num_verts; ++i) {
-               stt_vertex* v = &comp_verts[i];
-               stt_vertex_type x,y;
-               x=v->x; y=v->y;
-               v->x = (stt_vertex_type)(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
-               v->y = (stt_vertex_type)(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
-               x=v->cx; y=v->cy;
-               v->cx = (stt_vertex_type)(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
-               v->cy = (stt_vertex_type)(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
+            if (comp_num_verts > 0x7fffffff-num_vertices) {
+               STT_free(comp_verts, info->userdata);
+               goto malformed;
             }
-            // Append vertices.
-            tmp = (stt_vertex*)STT_malloc((num_vertices+comp_num_verts)*sizeof(stt_vertex), info->userdata);
+            for (i=0; i<comp_num_verts; ++i) {
+               stt_vertex *v = &comp_verts[i];
+               float tx, ty;
+               stt_vertex_type vx = v->x, vy = v->y;
+               tx = m*(mtx[0]*vx+mtx[2]*vy+mtx[4]);
+               ty = n*(mtx[1]*vx+mtx[3]*vy+mtx[5]);
+               if (tx < -32768.0f) tx = -32768.0f;
+               if (tx >  32767.0f) tx =  32767.0f;
+               if (ty < -32768.0f) ty = -32768.0f;
+               if (ty >  32767.0f) ty =  32767.0f;
+               v->x = (stt_vertex_type)tx;
+               v->y = (stt_vertex_type)ty;
+               vx = v->cx; vy = v->cy;
+               tx = m*(mtx[0]*vx+mtx[2]*vy+mtx[4]);
+               ty = n*(mtx[1]*vx+mtx[3]*vy+mtx[5]);
+               if (tx < -32768.0f) tx = -32768.0f;
+               if (tx >  32767.0f) tx =  32767.0f;
+               if (ty < -32768.0f) ty = -32768.0f;
+               if (ty >  32767.0f) ty =  32767.0f;
+               v->cx = (stt_vertex_type)tx;
+               v->cy = (stt_vertex_type)ty;
+            }
+            tmp = (stt_vertex *)STT_malloc(
+               (size_t)(num_vertices+comp_num_verts)*sizeof(*tmp),
+               info->userdata);
             if (!tmp) {
-               if (vertices) STT_free(vertices, info->userdata);
-               if (comp_verts) STT_free(comp_verts, info->userdata);
-               return 0;
+               STT_free(comp_verts, info->userdata);
+               goto malformed;
             }
-            if (num_vertices > 0 && vertices) STT_memcpy(tmp, vertices, num_vertices*sizeof(stt_vertex));
-            STT_memcpy(tmp+num_vertices, comp_verts, comp_num_verts*sizeof(stt_vertex));
+            if (num_vertices)
+               STT_memcpy(tmp, vertices, (size_t)num_vertices*sizeof(*tmp));
+            STT_memcpy(tmp+num_vertices, comp_verts,
+                       (size_t)comp_num_verts*sizeof(*tmp));
             if (vertices) STT_free(vertices, info->userdata);
-            vertices = tmp;
             STT_free(comp_verts, info->userdata);
+            vertices = tmp;
             num_vertices += comp_num_verts;
          }
-         // More components ?
          more = flags & (1<<5);
       }
-   } else {
-      // numberOfCounters == 0, do nothing
    }
 
    *pvertices = vertices;
    return num_vertices;
+
+malformed:
+   if (vertices) STT_free(vertices, info->userdata);
+   return 0;
 }
 
 typedef struct
@@ -2013,9 +2179,11 @@ typedef struct
 
    stt_vertex *pvertices;
    int num_vertices;
+   int capacity;
+   int failed;
 } stt__csctx;
 
-#define STT__CSCTX_INIT(bounds) {bounds,0, 0,0, 0,0, 0,0,0,0, NULL, 0}
+#define STT__CSCTX_INIT(bounds) {bounds,0, 0,0, 0,0, 0,0,0,0, NULL, 0, 0, 0}
 
 static void stt__track_vertex(stt__csctx *c, stt_int32 x, stt_int32 y)
 {
@@ -2035,6 +2203,10 @@ static void stt__csctx_v(stt__csctx *c, stt_uint8 type, stt_int32 x, stt_int32 y
          stt__track_vertex(c, cx1, cy1);
       }
    } else {
+      if (!c->pvertices || c->num_vertices >= c->capacity) {
+         c->failed = 1;
+         return;
+      }
       stt_setvertex(&c->pvertices[c->num_vertices], type, x, y, cx, cy);
       c->pvertices[c->num_vertices].cx1 = (stt_int16) cx1;
       c->pvertices[c->num_vertices].cy1 = (stt_int16) cy1;
@@ -2090,9 +2262,12 @@ static stt__buf stt__get_subr(stt__buf idx, int n)
 
 static stt__buf stt__cid_get_glyph_subrs(const stt_fontinfo *info, int glyph_index)
 {
-   stt__buf fdselect = info->fdselect;
+   stt__buf fdselect;
    int nranges, start, end, v, fmt, fdselector = -1, i;
 
+   if (!info || glyph_index < 0 || glyph_index >= info->numGlyphs)
+      return stt__new_buf(NULL, 0);
+   fdselect = info->fdselect;
    stt__buf_seek(&fdselect, 0);
    fmt = stt__buf_get8(&fdselect);
    if (fmt == 0) {
@@ -2112,7 +2287,7 @@ static stt__buf stt__cid_get_glyph_subrs(const stt_fontinfo *info, int glyph_ind
          start = end;
       }
    }
-   if (fdselector == -1) stt__new_buf(NULL, 0);
+   if (fdselector == -1) return stt__new_buf(NULL, 0);
    return stt__get_subrs(info->cff, stt__cff_index_get(info->fontdicts, fdselector));
 }
 
@@ -2121,14 +2296,18 @@ static int stt__run_charstring(const stt_fontinfo *info, int glyph_index, stt__c
    int in_header = 1, maskbits = 0, subr_stack_height = 0, sp = 0, v, i, b0;
    int has_subrs = 0, clear_stack;
    float s[48];
-   stt__buf subr_stack[10], subrs = info->subrs, b;
+   stt__buf subr_stack[10], subrs, b;
    float f;
 
 #define STT__CSERR(s) (0)
 
    // this currently ignores the initial width value, which isn't needed if we have hmtx
+   if (!info || !c || glyph_index < 0 || glyph_index >= info->numGlyphs)
+      return 0;
+   subrs = info->subrs;
    b = stt__cff_index_get(info->charstrings, glyph_index);
    while (b.cursor < b.size) {
+      if (c->failed) return 0;
       i = 0;
       clear_stack = 1;
       b0 = stt__buf_get8(&b);
@@ -2268,7 +2447,7 @@ static int stt__run_charstring(const stt_fontinfo *info, int glyph_index, stt__c
 
       case 0x0E: // endchar
          stt__csctx_close_shape(c);
-         return 1;
+         return !c->failed;
 
       case 0x0C: { // two-byte escape
          float dx1, dx2, dx3, dx4, dx5, dx6, dy1, dy2, dy3, dy4, dy5, dy6;
@@ -2380,13 +2559,21 @@ static int stt__GetGlyphShapeT2(const stt_fontinfo *info, int glyph_index, stt_v
    // runs the charstring twice, once to count and once to output (to avoid realloc)
    stt__csctx count_ctx = STT__CSCTX_INIT(1);
    stt__csctx output_ctx = STT__CSCTX_INIT(0);
-   if (stt__run_charstring(info, glyph_index, &count_ctx)) {
-      *pvertices = (stt_vertex*)STT_malloc(count_ctx.num_vertices*sizeof(stt_vertex), info->userdata);
+   if (!pvertices) return 0;
+   *pvertices = NULL;
+   if (stt__run_charstring(info, glyph_index, &count_ctx) &&
+       count_ctx.num_vertices > 0 &&
+       (size_t)count_ctx.num_vertices <= ((size_t)-1)/sizeof(stt_vertex)) {
+      *pvertices = (stt_vertex*)STT_malloc(
+         (size_t)count_ctx.num_vertices*sizeof(stt_vertex), info->userdata);
+      if (!*pvertices) return 0;
       output_ctx.pvertices = *pvertices;
+      output_ctx.capacity = count_ctx.num_vertices;
       if (stt__run_charstring(info, glyph_index, &output_ctx)) {
-         STT_assert(output_ctx.num_vertices == count_ctx.num_vertices);
-         return output_ctx.num_vertices;
+         if (!output_ctx.failed && output_ctx.num_vertices == count_ctx.num_vertices)
+            return output_ctx.num_vertices;
       }
+      STT_free(*pvertices, info->userdata);
    }
    *pvertices = NULL;
    return 0;
@@ -2405,61 +2592,75 @@ static int stt__GetGlyphInfoT2(const stt_fontinfo *info, int glyph_index, int *x
 
 STT_DEF int stt_GetGlyphShape(const stt_fontinfo *info, int glyph_index, stt_vertex **pvertices)
 {
+   if (!pvertices) return 0;
+   *pvertices = NULL;
+   if (!info || glyph_index < 0 || glyph_index >= info->numGlyphs) return 0;
    if (!info->cff.size)
-      return stt__GetGlyphShapeTT(info, glyph_index, pvertices);
+      return stt__GetGlyphShapeTT(info, glyph_index, pvertices, 0);
    else
       return stt__GetGlyphShapeT2(info, glyph_index, pvertices);
 }
 
 STT_DEF void stt_GetGlyphHMetrics(const stt_fontinfo *info, int glyph_index, int *advanceWidth, int *leftSideBearing)
 {
-   stt_uint16 numOfLongHorMetrics = ttUSHORT(info->data+info->hhea + 34);
+   stt_uint16 numOfLongHorMetrics;
+   stt_uint32 hmtx_size, metric_offset;
+   if (advanceWidth) *advanceWidth = 0;
+   if (leftSideBearing) *leftSideBearing = 0;
+   if (!info || glyph_index < 0 || glyph_index >= info->numGlyphs) return;
+   numOfLongHorMetrics = stt__safe_read16(info, info->hhea+34);
+   hmtx_size = stt__get_table_size(info, info->fontstart, "hmtx");
+   if (!numOfLongHorMetrics || !hmtx_size) return;
    if (glyph_index < numOfLongHorMetrics) {
-      if (advanceWidth)     *advanceWidth    = ttSHORT(info->data + info->hmtx + 4*glyph_index);
-      if (leftSideBearing)  *leftSideBearing = ttSHORT(info->data + info->hmtx + 4*glyph_index + 2);
+      metric_offset = (stt_uint32)glyph_index*4;
+      if (metric_offset > hmtx_size || hmtx_size-metric_offset < 4) return;
+      if (advanceWidth) *advanceWidth = stt__safe_read16(info,
+                                                          info->hmtx+metric_offset);
+      if (leftSideBearing) *leftSideBearing = stt__safe_read16_signed(
+         info, info->hmtx+metric_offset+2);
    } else {
-      if (advanceWidth)     *advanceWidth    = ttSHORT(info->data + info->hmtx + 4*(numOfLongHorMetrics-1));
-      if (leftSideBearing)  *leftSideBearing = ttSHORT(info->data + info->hmtx + 4*numOfLongHorMetrics + 2*(glyph_index - numOfLongHorMetrics));
+      metric_offset = (stt_uint32)(numOfLongHorMetrics-1)*4;
+      if (metric_offset > hmtx_size || hmtx_size-metric_offset < 2) return;
+      if (advanceWidth) *advanceWidth = stt__safe_read16(info,
+                                                          info->hmtx+metric_offset);
+      metric_offset = (stt_uint32)numOfLongHorMetrics*4+
+                      (stt_uint32)(glyph_index-numOfLongHorMetrics)*2;
+      if (metric_offset > hmtx_size || hmtx_size-metric_offset < 2) return;
+      if (leftSideBearing) *leftSideBearing = stt__safe_read16_signed(
+         info, info->hmtx+metric_offset);
    }
 }
 
 STT_DEF int  stt_GetKerningTableLength(const stt_fontinfo *info)
 {
-   stt_uint8 *data = info->data + info->kern;
+   stt_uint32 size, pairs;
 
    // we only look at the first table. it must be 'horizontal' and format 0.
-   if (!info->kern)
+   if (!info || !info->kern)
       return 0;
-   if (ttUSHORT(data+2) < 1) // number of tables, need at least 1
+   size = stt__get_table_size(info, info->fontstart, "kern");
+   if (size < 18 || stt__safe_read16(info, info->kern+2) < 1)
       return 0;
-   if (ttUSHORT(data+8) != 1) // horizontal flag must be set in format
+   if (stt__safe_read16(info, info->kern+8) != 1)
       return 0;
-
-   return ttUSHORT(data+10);
+   pairs = stt__safe_read16(info, info->kern+10);
+   return pairs <= (size-18)/6 ? (int)pairs : 0;
 }
 
 STT_DEF int stt_GetKerningTable(const stt_fontinfo *info, stt_kerningentry* table, int table_length)
 {
-   stt_uint8 *data = info->data + info->kern;
-   int k, length;
+   int k, length = stt_GetKerningTableLength(info);
 
-   // we only look at the first table. it must be 'horizontal' and format 0.
-   if (!info->kern)
-      return 0;
-   if (ttUSHORT(data+2) < 1) // number of tables, need at least 1
-      return 0;
-   if (ttUSHORT(data+8) != 1) // horizontal flag must be set in format
-      return 0;
-
-   length = ttUSHORT(data+10);
+   if (!table || table_length <= 0 || length <= 0) return 0;
    if (table_length < length)
       length = table_length;
 
    for (k = 0; k < length; k++)
    {
-      table[k].glyph1 = ttUSHORT(data+18+(k*6));
-      table[k].glyph2 = ttUSHORT(data+20+(k*6));
-      table[k].advance = ttSHORT(data+22+(k*6));
+      stt_uint32 entry = (stt_uint32)info->kern+18+(stt_uint32)k*6;
+      table[k].glyph1 = stt__safe_read16(info, entry);
+      table[k].glyph2 = stt__safe_read16(info, entry+2);
+      table[k].advance = stt__safe_read16_signed(info, entry+4);
    }
 
    return length;
@@ -2467,49 +2668,57 @@ STT_DEF int stt_GetKerningTable(const stt_fontinfo *info, stt_kerningentry* tabl
 
 static int stt__GetGlyphKernInfoAdvance(const stt_fontinfo *info, int glyph1, int glyph2)
 {
-   stt_uint8 *data = info->data + info->kern;
    stt_uint32 needle, straw;
    int l, r, m;
+   int pair_count = stt_GetKerningTableLength(info);
 
-   // we only look at the first table. it must be 'horizontal' and format 0.
-   if (!info->kern)
-      return 0;
-   if (ttUSHORT(data+2) < 1) // number of tables, need at least 1
-      return 0;
-   if (ttUSHORT(data+8) != 1) // horizontal flag must be set in format
-      return 0;
-
+   if (pair_count <= 0 || glyph1 < 0 || glyph2 < 0 ||
+       glyph1 > 0xffff || glyph2 > 0xffff) return 0;
    l = 0;
-   r = ttUSHORT(data+10) - 1;
-   needle = glyph1 << 16 | glyph2;
+   r = pair_count-1;
+   needle = ((stt_uint32)glyph1 << 16) | (stt_uint32)glyph2;
    while (l <= r) {
+      stt_uint32 entry;
       m = (l + r) >> 1;
-      straw = ttULONG(data+18+(m*6)); // note: unaligned read
+      entry = (stt_uint32)info->kern+18+(stt_uint32)m*6;
+      straw = stt__safe_read32(info, entry);
       if (needle < straw)
          r = m - 1;
       else if (needle > straw)
          l = m + 1;
       else
-         return ttSHORT(data+22+(m*6));
+         return stt__safe_read16_signed(info, entry+4);
    }
    return 0;
 }
 
-static stt_int32 stt__GetCoverageIndex(stt_uint8 *coverageTable, int glyph)
+static int stt__table_range(stt_uint32 base, stt_uint32 size,
+                            stt_uint32 offset, stt_uint32 bytes)
 {
-   stt_uint16 coverageFormat = ttUSHORT(coverageTable);
+   if (offset < base || offset-base > size) return 0;
+   return bytes <= size-(offset-base);
+}
+
+static stt_int32 stt__GetCoverageIndex(const stt_fontinfo *info,
+                                        stt_uint32 base, stt_uint32 size,
+                                        stt_uint32 coverage, int glyph)
+{
+   stt_uint16 coverageFormat;
+   if (!stt__table_range(base, size, coverage, 4)) return -1;
+   coverageFormat = stt__safe_read16(info, coverage);
    switch (coverageFormat) {
       case 1: {
-         stt_uint16 glyphCount = ttUSHORT(coverageTable + 2);
+         stt_uint16 glyphCount = stt__safe_read16(info, coverage+2);
 
          // Binary search.
          stt_int32 l=0, r=glyphCount-1, m;
          int straw, needle=glyph;
+         if (!stt__table_range(base, size, coverage, 4+(stt_uint32)glyphCount*2))
+            return -1;
          while (l <= r) {
-            stt_uint8 *glyphArray = coverageTable + 4;
             stt_uint16 glyphID;
             m = (l + r) >> 1;
-            glyphID = ttUSHORT(glyphArray + 2 * m);
+            glyphID = stt__safe_read16(info, coverage+4+2*(stt_uint32)m);
             straw = glyphID;
             if (needle < straw)
                r = m - 1;
@@ -2523,24 +2732,25 @@ static stt_int32 stt__GetCoverageIndex(stt_uint8 *coverageTable, int glyph)
       }
 
       case 2: {
-         stt_uint16 rangeCount = ttUSHORT(coverageTable + 2);
-         stt_uint8 *rangeArray = coverageTable + 4;
+         stt_uint16 rangeCount = stt__safe_read16(info, coverage+2);
 
          // Binary search.
          stt_int32 l=0, r=rangeCount-1, m;
          int strawStart, strawEnd, needle=glyph;
+         if (!stt__table_range(base, size, coverage, 4+(stt_uint32)rangeCount*6))
+            return -1;
          while (l <= r) {
-            stt_uint8 *rangeRecord;
+            stt_uint32 rangeRecord;
             m = (l + r) >> 1;
-            rangeRecord = rangeArray + 6 * m;
-            strawStart = ttUSHORT(rangeRecord);
-            strawEnd = ttUSHORT(rangeRecord + 2);
+            rangeRecord = coverage+4+6*(stt_uint32)m;
+            strawStart = stt__safe_read16(info, rangeRecord);
+            strawEnd = stt__safe_read16(info, rangeRecord+2);
             if (needle < strawStart)
                r = m - 1;
             else if (needle > strawEnd)
                l = m + 1;
             else {
-               stt_uint16 startCoverageIndex = ttUSHORT(rangeRecord + 4);
+               stt_uint16 startCoverageIndex = stt__safe_read16(info, rangeRecord+4);
                return startCoverageIndex + glyph - strawStart;
             }
          }
@@ -2553,40 +2763,49 @@ static stt_int32 stt__GetCoverageIndex(stt_uint8 *coverageTable, int glyph)
    return -1;
 }
 
-static stt_int32  stt__GetGlyphClass(stt_uint8 *classDefTable, int glyph)
+static stt_int32 stt__GetGlyphClass(const stt_fontinfo *info,
+                                     stt_uint32 base, stt_uint32 size,
+                                     stt_uint32 class_def, int glyph)
 {
-   stt_uint16 classDefFormat = ttUSHORT(classDefTable);
+   stt_uint16 classDefFormat;
+   if (!stt__table_range(base, size, class_def, 4)) return -1;
+   classDefFormat = stt__safe_read16(info, class_def);
    switch (classDefFormat)
    {
       case 1: {
-         stt_uint16 startGlyphID = ttUSHORT(classDefTable + 2);
-         stt_uint16 glyphCount = ttUSHORT(classDefTable + 4);
-         stt_uint8 *classDef1ValueArray = classDefTable + 6;
+         stt_uint16 startGlyphID, glyphCount;
+         if (!stt__table_range(base, size, class_def, 6)) return -1;
+         startGlyphID = stt__safe_read16(info, class_def+2);
+         glyphCount = stt__safe_read16(info, class_def+4);
+         if (!stt__table_range(base, size, class_def, 6+(stt_uint32)glyphCount*2))
+            return -1;
 
          if (glyph >= startGlyphID && glyph < startGlyphID + glyphCount)
-            return (stt_int32)ttUSHORT(classDef1ValueArray + 2 * (glyph - startGlyphID));
+            return stt__safe_read16(info, class_def+6+
+                                    2*(stt_uint32)(glyph-startGlyphID));
          break;
       }
 
       case 2: {
-         stt_uint16 classRangeCount = ttUSHORT(classDefTable + 2);
-         stt_uint8 *classRangeRecords = classDefTable + 4;
+         stt_uint16 classRangeCount = stt__safe_read16(info, class_def+2);
 
          // Binary search.
          stt_int32 l=0, r=classRangeCount-1, m;
          int strawStart, strawEnd, needle=glyph;
+         if (!stt__table_range(base, size, class_def,
+                               4+(stt_uint32)classRangeCount*6)) return -1;
          while (l <= r) {
-            stt_uint8 *classRangeRecord;
+            stt_uint32 classRangeRecord;
             m = (l + r) >> 1;
-            classRangeRecord = classRangeRecords + 6 * m;
-            strawStart = ttUSHORT(classRangeRecord);
-            strawEnd = ttUSHORT(classRangeRecord + 2);
+            classRangeRecord = class_def+4+6*(stt_uint32)m;
+            strawStart = stt__safe_read16(info, classRangeRecord);
+            strawEnd = stt__safe_read16(info, classRangeRecord+2);
             if (needle < strawStart)
                r = m - 1;
             else if (needle > strawEnd)
                l = m + 1;
             else
-               return (stt_int32)ttUSHORT(classRangeRecord + 4);
+               return stt__safe_read16(info, classRangeRecord+4);
          }
          break;
       }
@@ -2604,56 +2823,70 @@ static stt_int32  stt__GetGlyphClass(stt_uint8 *classDefTable, int glyph)
 
 static stt_int32 stt__GetGlyphGPOSInfoAdvance(const stt_fontinfo *info, int glyph1, int glyph2)
 {
-   stt_uint16 lookupListOffset;
-   stt_uint8 *lookupList;
-   stt_uint16 lookupCount;
-   stt_uint8 *data;
+   stt_uint16 lookupListOffset, lookupCount;
+   stt_uint32 size, lookupList;
    stt_int32 i, sti;
 
    if (!info->gpos) return 0;
+   size = stt__get_table_size(info, info->fontstart, "GPOS");
+   if (size < 10 || stt__safe_read16(info, info->gpos) != 1 ||
+       stt__safe_read16(info, info->gpos+2) != 0) return 0;
 
-   data = info->data + info->gpos;
-
-   if (ttUSHORT(data+0) != 1) return 0; // Major version 1
-   if (ttUSHORT(data+2) != 0) return 0; // Minor version 0
-
-   lookupListOffset = ttUSHORT(data+8);
-   lookupList = data + lookupListOffset;
-   lookupCount = ttUSHORT(lookupList);
+   lookupListOffset = stt__safe_read16(info, info->gpos+8);
+   if (lookupListOffset > size || size-lookupListOffset < 2) return 0;
+   lookupList = (stt_uint32)info->gpos+lookupListOffset;
+   lookupCount = stt__safe_read16(info, lookupList);
+   if (!stt__table_range(info->gpos, size, lookupList,
+                         2+(stt_uint32)lookupCount*2)) return 0;
 
    for (i=0; i<lookupCount; ++i) {
-      stt_uint16 lookupOffset = ttUSHORT(lookupList + 2 + 2 * i);
-      stt_uint8 *lookupTable = lookupList + lookupOffset;
-
-      stt_uint16 lookupType = ttUSHORT(lookupTable);
-      stt_uint16 subTableCount = ttUSHORT(lookupTable + 4);
-      stt_uint8 *subTableOffsets = lookupTable + 6;
+      stt_uint16 lookupOffset = stt__safe_read16(info, lookupList+2+2*(stt_uint32)i);
+      stt_uint32 lookupTable = lookupList+lookupOffset;
+      stt_uint16 lookupType, subTableCount;
+      if (!stt__table_range(info->gpos, size, lookupTable, 6)) return 0;
+      lookupType = stt__safe_read16(info, lookupTable);
+      subTableCount = stt__safe_read16(info, lookupTable+4);
+      if (!stt__table_range(info->gpos, size, lookupTable,
+                            6+(stt_uint32)subTableCount*2)) return 0;
       if (lookupType != 2) // Pair Adjustment Positioning Subtable
          continue;
 
       for (sti=0; sti<subTableCount; sti++) {
-         stt_uint16 subtableOffset = ttUSHORT(subTableOffsets + 2 * sti);
-         stt_uint8 *table = lookupTable + subtableOffset;
-         stt_uint16 posFormat = ttUSHORT(table);
-         stt_uint16 coverageOffset = ttUSHORT(table + 2);
-         stt_int32 coverageIndex = stt__GetCoverageIndex(table + coverageOffset, glyph1);
+         stt_uint16 subtableOffset = stt__safe_read16(info,
+            lookupTable+6+2*(stt_uint32)sti);
+         stt_uint32 table = lookupTable+subtableOffset;
+         stt_uint16 posFormat, coverageOffset;
+         stt_int32 coverageIndex;
+         if (!stt__table_range(info->gpos, size, table, 4)) return 0;
+         posFormat = stt__safe_read16(info, table);
+         coverageOffset = stt__safe_read16(info, table+2);
+         if (coverageOffset > size-(table-(stt_uint32)info->gpos)) return 0;
+         coverageIndex = stt__GetCoverageIndex(info, info->gpos, size,
+                                                table+coverageOffset, glyph1);
          if (coverageIndex == -1) continue;
 
          switch (posFormat) {
             case 1: {
                stt_int32 l, r, m;
                int straw, needle;
-               stt_uint16 valueFormat1 = ttUSHORT(table + 4);
-               stt_uint16 valueFormat2 = ttUSHORT(table + 6);
+               stt_uint16 valueFormat1, valueFormat2, pairSetCount;
+               if (!stt__table_range(info->gpos, size, table, 10)) return 0;
+               valueFormat1 = stt__safe_read16(info, table+4);
+               valueFormat2 = stt__safe_read16(info, table+6);
                if (valueFormat1 == 4 && valueFormat2 == 0) { // Support more formats?
-                  stt_int32 valueRecordPairSizeInBytes = 2;
-                  stt_uint16 pairSetCount = ttUSHORT(table + 8);
-                  stt_uint16 pairPosOffset = ttUSHORT(table + 10 + 2 * coverageIndex);
-                  stt_uint8 *pairValueTable = table + pairPosOffset;
-                  stt_uint16 pairValueCount = ttUSHORT(pairValueTable);
-                  stt_uint8 *pairValueArray = pairValueTable + 2;
-
+                  stt_uint16 pairPosOffset, pairValueCount;
+                  stt_uint32 pairValueTable;
+                  pairSetCount = stt__safe_read16(info, table+8);
                   if (coverageIndex >= pairSetCount) return 0;
+                  if (!stt__table_range(info->gpos, size, table,
+                        10+(stt_uint32)pairSetCount*2)) return 0;
+                  pairPosOffset = stt__safe_read16(info,
+                     table+10+2*(stt_uint32)coverageIndex);
+                  pairValueTable = table+pairPosOffset;
+                  if (!stt__table_range(info->gpos, size, pairValueTable, 2)) return 0;
+                  pairValueCount = stt__safe_read16(info, pairValueTable);
+                  if (!stt__table_range(info->gpos, size, pairValueTable,
+                                        2+(stt_uint32)pairValueCount*4)) return 0;
 
                   needle=glyph2;
                   r=pairValueCount-1;
@@ -2662,17 +2895,17 @@ static stt_int32 stt__GetGlyphGPOSInfoAdvance(const stt_fontinfo *info, int glyp
                   // Binary search.
                   while (l <= r) {
                      stt_uint16 secondGlyph;
-                     stt_uint8 *pairValue;
+                     stt_uint32 pairValue;
                      m = (l + r) >> 1;
-                     pairValue = pairValueArray + (2 + valueRecordPairSizeInBytes) * m;
-                     secondGlyph = ttUSHORT(pairValue);
+                     pairValue = pairValueTable+2+4*(stt_uint32)m;
+                     secondGlyph = stt__safe_read16(info, pairValue);
                      straw = secondGlyph;
                      if (needle < straw)
                         r = m - 1;
                      else if (needle > straw)
                         l = m + 1;
                      else {
-                        stt_int16 xAdvance = ttSHORT(pairValue + 2);
+                        stt_int16 xAdvance = stt__safe_read16_signed(info, pairValue+2);
                         return xAdvance;
                      }
                   }
@@ -2682,25 +2915,32 @@ static stt_int32 stt__GetGlyphGPOSInfoAdvance(const stt_fontinfo *info, int glyp
             }
 
             case 2: {
-               stt_uint16 valueFormat1 = ttUSHORT(table + 4);
-               stt_uint16 valueFormat2 = ttUSHORT(table + 6);
+               stt_uint16 valueFormat1, valueFormat2;
+               if (!stt__table_range(info->gpos, size, table, 16)) return 0;
+               valueFormat1 = stt__safe_read16(info, table+4);
+               valueFormat2 = stt__safe_read16(info, table+6);
                if (valueFormat1 == 4 && valueFormat2 == 0) { // Support more formats?
-                  stt_uint16 classDef1Offset = ttUSHORT(table + 8);
-                  stt_uint16 classDef2Offset = ttUSHORT(table + 10);
-                  int glyph1class = stt__GetGlyphClass(table + classDef1Offset, glyph1);
-                  int glyph2class = stt__GetGlyphClass(table + classDef2Offset, glyph2);
-
-                  stt_uint16 class1Count = ttUSHORT(table + 12);
-                  stt_uint16 class2Count = ttUSHORT(table + 14);
-                  stt_uint8 *class1Records, *class2Records;
+                  stt_uint16 classDef1Offset = stt__safe_read16(info, table+8);
+                  stt_uint16 classDef2Offset = stt__safe_read16(info, table+10);
+                  int glyph1class = stt__GetGlyphClass(info, info->gpos, size,
+                                                       table+classDef1Offset, glyph1);
+                  int glyph2class = stt__GetGlyphClass(info, info->gpos, size,
+                                                       table+classDef2Offset, glyph2);
+                  stt_uint16 class1Count = stt__safe_read16(info, table+12);
+                  stt_uint16 class2Count = stt__safe_read16(info, table+14);
+                  stt_uint32 record_index, record_count, table_relative;
                   stt_int16 xAdvance;
 
                   if (glyph1class < 0 || glyph1class >= class1Count) return 0; // malformed
                   if (glyph2class < 0 || glyph2class >= class2Count) return 0; // malformed
-
-                  class1Records = table + 16;
-                  class2Records = class1Records + 2 * (glyph1class * class2Count);
-                  xAdvance = ttSHORT(class2Records + 2 * glyph2class);
+                  record_count = (stt_uint32)class1Count*class2Count;
+                  table_relative = table-(stt_uint32)info->gpos;
+                  if (table_relative > size || size-table_relative < 16 ||
+                      record_count > (size-table_relative-16)/2) return 0;
+                  record_index = (stt_uint32)glyph1class*class2Count+
+                                 (stt_uint32)glyph2class;
+                  xAdvance = stt__safe_read16_signed(info,
+                                                     table+16+record_index*2);
                   return xAdvance;
                } else
                   return 0;
@@ -2720,6 +2960,8 @@ STT_DEF int  stt_GetGlyphKernAdvance(const stt_fontinfo *info, int g1, int g2)
 {
    int xAdvance = 0;
 
+   if (!info || g1 < 0 || g2 < 0 || g1 >= info->numGlyphs ||
+       g2 >= info->numGlyphs) return 0;
    if (info->gpos)
       xAdvance += stt__GetGlyphGPOSInfoAdvance(info, g1, g2);
    else if (info->kern)
@@ -2742,6 +2984,12 @@ STT_DEF void stt_GetCodepointHMetrics(const stt_fontinfo *info, int codepoint, i
 
 STT_DEF void stt_GetFontVMetrics(const stt_fontinfo *info, int *ascent, int *descent, int *lineGap)
 {
+   if (!info) {
+      if (ascent) *ascent = 0;
+      if (descent) *descent = 0;
+      if (lineGap) *lineGap = 0;
+      return;
+   }
    if (ascent ) *ascent  = stt__safe_read16_signed(info, info->hhea + 4);
    if (descent) *descent = stt__safe_read16_signed(info, info->hhea + 6);
    if (lineGap) *lineGap = stt__safe_read16_signed(info, info->hhea + 8);
@@ -2749,69 +2997,95 @@ STT_DEF void stt_GetFontVMetrics(const stt_fontinfo *info, int *ascent, int *des
 
 STT_DEF int  stt_GetFontVMetricsOS2(const stt_fontinfo *info, int *typoAscent, int *typoDescent, int *typoLineGap)
 {
-   int tab = stt__find_table(info, info->fontstart, "OS/2");
-   if (!tab)
+   int tab;
+   if (!info) return 0;
+   tab = stt__find_table(info, info->fontstart, "OS/2");
+   if (!tab || stt__get_table_size(info, info->fontstart, "OS/2") < 74)
       return 0;
-   if (typoAscent ) *typoAscent  = stt__safe_ttSHORT(info, info->data+tab + 68);
-   if (typoDescent) *typoDescent = stt__safe_ttSHORT(info, info->data+tab + 70);
-   if (typoLineGap) *typoLineGap = stt__safe_ttSHORT(info, info->data+tab + 72);
+   if (typoAscent ) *typoAscent  = stt__safe_read16_signed(info, tab+68);
+   if (typoDescent) *typoDescent = stt__safe_read16_signed(info, tab+70);
+   if (typoLineGap) *typoLineGap = stt__safe_read16_signed(info, tab+72);
    return 1;
 }
 
 STT_DEF void stt_GetFontBoundingBox(const stt_fontinfo *info, int *x0, int *y0, int *x1, int *y1)
 {
-   *x0 = ttSHORT(info->data + info->head + 36);
-   *y0 = ttSHORT(info->data + info->head + 38);
-   *x1 = ttSHORT(info->data + info->head + 40);
-   *y1 = ttSHORT(info->data + info->head + 42);
+   if (x0) *x0 = info ? stt__safe_read16_signed(info, info->head+36) : 0;
+   if (y0) *y0 = info ? stt__safe_read16_signed(info, info->head+38) : 0;
+   if (x1) *x1 = info ? stt__safe_read16_signed(info, info->head+40) : 0;
+   if (y1) *y1 = info ? stt__safe_read16_signed(info, info->head+42) : 0;
 }
 
 STT_DEF float stt_ScaleForPixelHeight(const stt_fontinfo *info, float height)
 {
-   int fheight = ttSHORT(info->data + info->hhea + 4) - ttSHORT(info->data + info->hhea + 6);
-   return (float) height / fheight;
+   int fheight;
+   if (!info) return 0.0f;
+   fheight = stt__safe_read16_signed(info, info->hhea+4)-
+             stt__safe_read16_signed(info, info->hhea+6);
+   return fheight ? (float)height/fheight : 0.0f;
 }
 
 STT_DEF float stt_ScaleForMappingEmToPixels(const stt_fontinfo *info, float pixels)
 {
-   int unitsPerEm = ttUSHORT(info->data + info->head + 18);
-   return pixels / unitsPerEm;
+   int unitsPerEm;
+   if (!info) return 0.0f;
+   unitsPerEm = stt__safe_read16(info, info->head+18);
+   return unitsPerEm ? pixels/unitsPerEm : 0.0f;
 }
 
 STT_DEF void stt_FreeShape(const stt_fontinfo *info, stt_vertex *v)
 {
-   STT_free(v, info->userdata);
+   STT_free(v, info ? info->userdata : NULL);
 }
 
 STT_DEF stt_uint8 *stt_FindSVGDoc(const stt_fontinfo *info, int gl)
 {
-   int i;
-   stt_uint8 *data = info->data;
-   stt_uint8 *svg_doc_list = data + stt__get_svg((stt_fontinfo *) info);
-
-   int numEntries = ttUSHORT(svg_doc_list);
-   stt_uint8 *svg_docs = svg_doc_list + 2;
+   int i, list;
+   stt_uint32 table, size, relative;
+   stt_uint16 numEntries;
+   if (!info || gl < 0) return NULL;
+   list = stt__get_svg((stt_fontinfo *)info);
+   table = stt__find_table(info, info->fontstart, "SVG ");
+   size = stt__get_table_size(info, info->fontstart, "SVG ");
+   if (!list || !table || (stt_uint32)list < table) return NULL;
+   relative = (stt_uint32)list-table;
+   if (relative > size || size-relative < 2) return NULL;
+   numEntries = stt__safe_read16(info, (stt_uint32)list);
+   if ((stt_uint32)numEntries > (size-relative-2)/12) return NULL;
 
    for(i=0; i<numEntries; i++) {
-      stt_uint8 *svg_doc = svg_docs + (12 * i);
-      if ((gl >= ttUSHORT(svg_doc)) && (gl <= ttUSHORT(svg_doc + 2)))
-         return svg_doc;
+      stt_uint32 svg_doc = (stt_uint32)list+2+12*(stt_uint32)i;
+      if (gl >= stt__safe_read16(info, svg_doc) &&
+          gl <= stt__safe_read16(info, svg_doc+2))
+         return info->data+svg_doc;
    }
    return 0;
 }
 
 STT_DEF int stt_GetGlyphSVG(const stt_fontinfo *info, int gl, const char **svg)
 {
-   stt_uint8 *data = info->data;
    stt_uint8 *svg_doc;
+   stt_uint32 table, size, offset, length, list_relative;
 
-   if (info->svg == 0)
+   if (svg) *svg = NULL;
+   if (!info || !svg || gl < 0 || gl >= info->numGlyphs ||
+       stt__get_svg((stt_fontinfo *)info) == 0)
       return 0;
 
    svg_doc = stt_FindSVGDoc(info, gl);
    if (svg_doc != NULL) {
-      *svg = (char *) data + info->svg + ttULONG(svg_doc + 4);
-      return ttULONG(svg_doc + 8);
+      stt_uint32 record = (stt_uint32)(svg_doc-info->data);
+      table = stt__find_table(info, info->fontstart, "SVG ");
+      size = stt__get_table_size(info, info->fontstart, "SVG ");
+      if (!table || info->svg < (int)table) return 0;
+      list_relative = (stt_uint32)info->svg-table;
+      offset = stt__safe_read32(info, record+4);
+      length = stt__safe_read32(info, record+8);
+      if (list_relative > size || offset > size-list_relative ||
+          length > size-list_relative-offset || length > 0x7fffffff)
+         return 0;
+      *svg = (const char *)info->data+info->svg+offset;
+      return (int)length;
    } else {
       return 0;
    }
@@ -2837,11 +3111,25 @@ STT_DEF void stt_GetGlyphBitmapBoxSubpixel(const stt_fontinfo *font, int glyph, 
       if (ix1) *ix1 = 0;
       if (iy1) *iy1 = 0;
    } else {
+      float fx0 = x0*scale_x+shift_x;
+      float fy0 = -y1*scale_y+shift_y;
+      float fx1 = x1*scale_x+shift_x;
+      float fy1 = -y0*scale_y+shift_y;
+      if (!(fx0 >= -2147483000.0f && fx0 <= 2147483000.0f) ||
+          !(fy0 >= -2147483000.0f && fy0 <= 2147483000.0f) ||
+          !(fx1 >= -2147483000.0f && fx1 <= 2147483000.0f) ||
+          !(fy1 >= -2147483000.0f && fy1 <= 2147483000.0f)) {
+         if (ix0) *ix0 = 0;
+         if (iy0) *iy0 = 0;
+         if (ix1) *ix1 = 0;
+         if (iy1) *iy1 = 0;
+         return;
+      }
       // move to integral bboxes (treating pixels as little squares, what pixels get touched)?
-      if (ix0) *ix0 = STT_ifloor( x0 * scale_x + shift_x);
-      if (iy0) *iy0 = STT_ifloor(-y1 * scale_y + shift_y);
-      if (ix1) *ix1 = STT_iceil ( x1 * scale_x + shift_x);
-      if (iy1) *iy1 = STT_iceil (-y0 * scale_y + shift_y);
+      if (ix0) *ix0 = STT_ifloor(fx0);
+      if (iy0) *iy0 = STT_ifloor(fy0);
+      if (ix1) *ix1 = STT_iceil(fx1);
+      if (iy1) *iy1 = STT_iceil(fy1);
    }
 }
 
@@ -2878,6 +3166,7 @@ typedef struct stt__hheap
 
 static void *stt__hheap_alloc(stt__hheap *hh, size_t size, void *userdata)
 {
+   if (!hh || size < sizeof(void *)) return NULL;
    if (hh->first_free) {
       void *p = hh->first_free;
       hh->first_free = * (void **) p;
@@ -2885,7 +3174,12 @@ static void *stt__hheap_alloc(stt__hheap *hh, size_t size, void *userdata)
    } else {
       if (hh->num_remaining_in_head_chunk == 0) {
          int count = (size < 32 ? 2000 : size < 128 ? 800 : 100);
-         stt__hheap_chunk *c = (stt__hheap_chunk *) STT_malloc(sizeof(stt__hheap_chunk) + size * count, userdata);
+         stt__hheap_chunk *c;
+         if (size > (((size_t)-1)-sizeof(stt__hheap_chunk)) /
+                    (size_t)count)
+            return NULL;
+         c = (stt__hheap_chunk *)STT_malloc(
+            sizeof(stt__hheap_chunk)+size*(size_t)count, userdata);
          if (c == NULL)
             return NULL;
          c->next = hh->head;
@@ -2899,12 +3193,14 @@ static void *stt__hheap_alloc(stt__hheap *hh, size_t size, void *userdata)
 
 static void stt__hheap_free(stt__hheap *hh, void *p)
 {
+   if (!hh || !p) return;
    *(void **) p = hh->first_free;
    hh->first_free = p;
 }
 
 static void stt__hheap_cleanup(stt__hheap *hh, void *userdata)
 {
+   if (!hh) return;
    stt__hheap_chunk *c = hh->head;
    while (c) {
       stt__hheap_chunk *n = c->next;
@@ -2944,9 +3240,17 @@ typedef struct stt__active_edge
 static stt__active_edge *stt__new_active(stt__hheap *hh, stt__edge *e, int off_x, float start_point, void *userdata)
 {
    stt__active_edge *z = (stt__active_edge *) stt__hheap_alloc(hh, sizeof(*z), userdata);
-   float dxdy = (e->x1 - e->x0) / (e->y1 - e->y0);
-   STT_assert(z != NULL);
+   float dxdy, x;
    if (!z) return z;
+   if (e->y1 == e->y0) {
+      stt__hheap_free(hh, z);
+      return NULL;
+   }
+   dxdy = (e->x1-e->x0)/(e->y1-e->y0);
+   if (!(dxdy >= -2097151.0f && dxdy <= 2097151.0f)) {
+      stt__hheap_free(hh, z);
+      return NULL;
+   }
 
    // round dx down to avoid overshooting
    if (dxdy < 0)
@@ -2954,8 +3258,13 @@ static stt__active_edge *stt__new_active(stt__hheap *hh, stt__edge *e, int off_x
    else
       z->dx = STT_ifloor(STT_FIX * dxdy);
 
-   z->x = STT_ifloor(STT_FIX * e->x0 + z->dx * (start_point - e->y0)); // use z->dx so when we offset later it's by the same amount
-   z->x -= off_x * STT_FIX;
+   x = STT_FIX*e->x0+z->dx*(start_point-e->y0)-
+       (float)off_x*STT_FIX;
+   if (!(x >= -2147483000.0f && x <= 2147483000.0f)) {
+      stt__hheap_free(hh, z);
+      return NULL;
+   }
+   z->x = STT_ifloor(x);
 
    z->ey = e->y1;
    z->next = 0;
@@ -2966,10 +3275,18 @@ static stt__active_edge *stt__new_active(stt__hheap *hh, stt__edge *e, int off_x
 static stt__active_edge *stt__new_active(stt__hheap *hh, stt__edge *e, int off_x, float start_point, void *userdata)
 {
    stt__active_edge *z = (stt__active_edge *) stt__hheap_alloc(hh, sizeof(*z), userdata);
-   float dxdy = (e->x1 - e->x0) / (e->y1 - e->y0);
-   STT_assert(z != NULL);
+   float dxdy;
    //STT_assert(e->y0 <= start_point);
    if (!z) return z;
+   if (e->y1 == e->y0) {
+      stt__hheap_free(hh, z);
+      return NULL;
+   }
+   dxdy = (e->x1-e->x0)/(e->y1-e->y0);
+   if (!(dxdy >= -3.4e38f && dxdy <= 3.4e38f)) {
+      stt__hheap_free(hh, z);
+      return NULL;
+   }
    z->fdx = dxdy;
    z->fdy = dxdy != 0.0f ? (1.0f/dxdy) : 0.0f;
    z->fx = e->x0 + dxdy * (start_point - e->y0);
@@ -3034,24 +3351,26 @@ static void stt__rasterize_sorted_edges(stt__bitmap *result, stt__edge *e, int n
 {
    stt__hheap hh = { 0, 0, 0 };
    stt__active_edge *active = NULL;
-   int y,j=0;
+   float y;
+   int j=0;
    int max_weight = (255 / vsubsample);  // weight per vertical scanline
    int s; // vertical subsample index
    unsigned char scanline_data[512], *scanline;
 
    if (result->w > 512)
-      scanline = (unsigned char *) STT_malloc(result->w, userdata);
+      scanline = (unsigned char *)STT_malloc((size_t)result->w, userdata);
    else
       scanline = scanline_data;
+   if (!scanline) return;
 
-   y = off_y * vsubsample;
-   e[n].y0 = (off_y + result->h) * (float) vsubsample + 1;
+   y = (float)off_y*(float)vsubsample;
+   e[n].y0 = ((float)off_y+(float)result->h)*(float)vsubsample+1;
 
    while (j < result->h) {
       STT_memset(scanline, 0, result->w);
       for (s=0; s < vsubsample; ++s) {
          // find center of pixel for this scanline
-         float scan_y = y + 0.5f;
+         float scan_y = y+0.5f;
          stt__active_edge **step = &active;
 
          // update all active edges;
@@ -3120,7 +3439,8 @@ static void stt__rasterize_sorted_edges(stt__bitmap *result, stt__edge *e, int n
 
          ++y;
       }
-      STT_memcpy(result->pixels + j * result->stride, scanline, result->w);
+      STT_memcpy(result->pixels+(size_t)j*(size_t)result->stride,
+                 scanline, (size_t)result->w);
       ++j;
    }
 
@@ -3407,20 +3727,25 @@ static void stt__rasterize_sorted_edges(stt__bitmap *result, stt__edge *e, int n
 {
    stt__hheap hh = { 0, 0, 0 };
    stt__active_edge *active = NULL;
-   int y,j=0, i;
+   float y;
+   int j=0, i;
    float scanline_data[129], *scanline, *scanline2;
 
    STT__NOTUSED(vsubsample);
 
-   if (result->w > 64)
-      scanline = (float *) STT_malloc((result->w*2+1) * sizeof(float), userdata);
+   if (result->w > 64) {
+      size_t scan_count = (size_t)result->w*2+1;
+      if (scan_count > ((size_t)-1)/sizeof(float)) return;
+      scanline = (float *)STT_malloc(scan_count*sizeof(float), userdata);
+   }
    else
       scanline = scanline_data;
+   if (!scanline) return;
 
    scanline2 = scanline + result->w;
 
-   y = off_y;
-   e[n].y0 = (float) (off_y + result->h) + 1;
+   y = (float)off_y;
+   e[n].y0 = (float)off_y+(float)result->h+1;
 
    while (j < result->h) {
       // find center of pixel for this scanline
@@ -3477,9 +3802,14 @@ static void stt__rasterize_sorted_edges(stt__bitmap *result, stt__edge *e, int n
             sum += scanline2[i];
             k = scanline[i] + sum;
             k = (float) STT_fabs(k)*255 + 0.5f;
-            m = (int) k;
-            if (m > 255) m = 255;
-            result->pixels[j*result->stride + i] = (unsigned char) m;
+            if (!(k >= 0.0f))
+               m = 0;
+            else if (k >= 255.0f)
+               m = 255;
+            else
+               m = (int)k;
+            result->pixels[(size_t)j*(size_t)result->stride+(size_t)i] =
+               (unsigned char)m;
          }
       }
       // advance all the edges
@@ -3612,10 +3942,17 @@ static void stt__rasterize(stt__bitmap *result, stt__point *pts, int *wcount, in
 
    // now we have to blow out the windings into explicit edge lists
    n = 0;
-   for (i=0; i < windings; ++i)
+   if (!result || !pts || !wcount || windings <= 0) return;
+   for (i=0; i < windings; ++i) {
+      if (wcount[i] < 0 || wcount[i] > STT_MAX_TESSELLATION_POINTS-n)
+         return;
       n += wcount[i];
+   }
+   if (n <= 0 || n > STT_MAX_TESSELLATION_POINTS ||
+       (size_t)n+1 > ((size_t)-1)/sizeof(*e))
+      return;
 
-   e = (stt__edge *) STT_malloc(sizeof(*e) * (n+1), userdata); // add an extra one as a sentinel
+   e = (stt__edge *)STT_malloc(sizeof(*e)*((size_t)n+1), userdata);
    if (e == 0) return;
    n = 0;
 
@@ -3669,11 +4006,19 @@ static int stt__tesselate_curve(stt__point *points, int *num_points, float x0, f
    // versus directly drawn line
    float dx = (x0+x2)/2 - mx;
    float dy = (y0+y2)/2 - my;
-   if (n > 16) // 65536 segments on one curve better be enough!
+   if (*num_points >= STT_MAX_TESSELLATION_POINTS) return 0;
+   if (n > 16) {
+      stt__add_point(points, *num_points, x2, y2);
+      *num_points = *num_points+1;
       return 1;
+   }
    if (dx*dx+dy*dy > objspace_flatness_squared) { // half-pixel error allowed... need to be smaller if AA
-      stt__tesselate_curve(points, num_points, x0,y0, (x0+x1)/2.0f,(y0+y1)/2.0f, mx,my, objspace_flatness_squared,n+1);
-      stt__tesselate_curve(points, num_points, mx,my, (x1+x2)/2.0f,(y1+y2)/2.0f, x2,y2, objspace_flatness_squared,n+1);
+      if (!stt__tesselate_curve(points, num_points, x0,y0,
+             (x0+x1)/2.0f,(y0+y1)/2.0f, mx,my,
+             objspace_flatness_squared,n+1)) return 0;
+      if (!stt__tesselate_curve(points, num_points, mx,my,
+             (x1+x2)/2.0f,(y1+y2)/2.0f, x2,y2,
+             objspace_flatness_squared,n+1)) return 0;
    } else {
       stt__add_point(points, *num_points,x2,y2);
       *num_points = *num_points+1;
@@ -3681,7 +4026,7 @@ static int stt__tesselate_curve(stt__point *points, int *num_points, float x0, f
    return 1;
 }
 
-static void stt__tesselate_cubic(stt__point *points, int *num_points, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float objspace_flatness_squared, int n)
+static int stt__tesselate_cubic(stt__point *points, int *num_points, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, float objspace_flatness_squared, int n)
 {
    // @TODO this "flatness" calculation is just made-up nonsense that seems to work well enough
    float dx0 = x1-x0;
@@ -3696,8 +4041,12 @@ static void stt__tesselate_cubic(stt__point *points, int *num_points, float x0, 
    float shortlen = (float) STT_sqrt(dx*dx+dy*dy);
    float flatness_squared = longlen*longlen-shortlen*shortlen;
 
-   if (n > 16) // 65536 segments on one curve better be enough!
-      return;
+   if (*num_points >= STT_MAX_TESSELLATION_POINTS) return 0;
+   if (n > 16) {
+      stt__add_point(points, *num_points, x3, y3);
+      *num_points = *num_points+1;
+      return 1;
+   }
 
    if (flatness_squared > objspace_flatness_squared) {
       float x01 = (x0+x1)/2;
@@ -3715,12 +4064,17 @@ static void stt__tesselate_cubic(stt__point *points, int *num_points, float x0, 
       float mx = (xa+xb)/2;
       float my = (ya+yb)/2;
 
-      stt__tesselate_cubic(points, num_points, x0,y0, x01,y01, xa,ya, mx,my, objspace_flatness_squared,n+1);
-      stt__tesselate_cubic(points, num_points, mx,my, xb,yb, x23,y23, x3,y3, objspace_flatness_squared,n+1);
+      if (!stt__tesselate_cubic(points, num_points, x0,y0, x01,y01,
+                                xa,ya, mx,my,
+                                objspace_flatness_squared,n+1)) return 0;
+      if (!stt__tesselate_cubic(points, num_points, mx,my, xb,yb,
+                                x23,y23, x3,y3,
+                                objspace_flatness_squared,n+1)) return 0;
    } else {
       stt__add_point(points, *num_points,x3,y3);
       *num_points = *num_points+1;
    }
+   return 1;
 }
 
 // returns number of contours
@@ -3732,6 +4086,11 @@ static stt__point *stt_FlattenCurves(stt_vertex *vertices, int num_verts, float 
    float objspace_flatness_squared = objspace_flatness * objspace_flatness;
    int i,n=0,start=0, pass;
 
+   if (!contour_lengths || !num_contours || !vertices || num_verts <= 0)
+      return NULL;
+   *contour_lengths = NULL;
+   *num_contours = 0;
+
    // count how many "moves" there are to get the contour count
    for (i=0; i < num_verts; ++i)
       if (vertices[i].type == STT_vmove)
@@ -3740,7 +4099,9 @@ static stt__point *stt_FlattenCurves(stt_vertex *vertices, int num_verts, float 
    *num_contours = n;
    if (n == 0) return 0;
 
-   *contour_lengths = (int *) STT_malloc(sizeof(**contour_lengths) * n, userdata);
+   if ((size_t)n > ((size_t)-1)/sizeof(**contour_lengths)) return NULL;
+   *contour_lengths = (int *)STT_malloc(sizeof(**contour_lengths)*(size_t)n,
+                                        userdata);
 
    if (*contour_lengths == 0) {
       *num_contours = 0;
@@ -3751,7 +4112,10 @@ static stt__point *stt_FlattenCurves(stt_vertex *vertices, int num_verts, float 
    for (pass=0; pass < 2; ++pass) {
       float x=0,y=0;
       if (pass == 1) {
-         points = (stt__point *) STT_malloc(num_points * sizeof(points[0]), userdata);
+         if (num_points <= 0 || num_points > STT_MAX_TESSELLATION_POINTS ||
+             (size_t)num_points > ((size_t)-1)/sizeof(points[0])) goto error;
+         points = (stt__point *)STT_malloc((size_t)num_points*sizeof(points[0]),
+                                           userdata);
          if (points == NULL) goto error;
       }
       num_points = 0;
@@ -3773,18 +4137,18 @@ static stt__point *stt_FlattenCurves(stt_vertex *vertices, int num_verts, float 
                stt__add_point(points, num_points++, x, y);
                break;
             case STT_vcurve:
-               stt__tesselate_curve(points, &num_points, x,y,
+               if (!stt__tesselate_curve(points, &num_points, x,y,
                                         vertices[i].cx, vertices[i].cy,
                                         vertices[i].x,  vertices[i].y,
-                                        objspace_flatness_squared, 0);
+                                        objspace_flatness_squared, 0)) goto error;
                x = vertices[i].x, y = vertices[i].y;
                break;
             case STT_vcubic:
-               stt__tesselate_cubic(points, &num_points, x,y,
+               if (!stt__tesselate_cubic(points, &num_points, x,y,
                                         vertices[i].cx, vertices[i].cy,
                                         vertices[i].cx1, vertices[i].cy1,
                                         vertices[i].x,  vertices[i].y,
-                                        objspace_flatness_squared, 0);
+                                        objspace_flatness_squared, 0)) goto error;
                x = vertices[i].x, y = vertices[i].y;
                break;
          }
@@ -3803,10 +4167,28 @@ error:
 
 STT_DEF void stt_Rasterize(stt__bitmap *result, float flatness_in_pixels, stt_vertex *vertices, int num_verts, float scale_x, float scale_y, float shift_x, float shift_y, int x_off, int y_off, int invert, void *userdata)
 {
-   float scale            = scale_x > scale_y ? scale_y : scale_x;
+   float abs_scale_x = (float)STT_fabs(scale_x);
+   float abs_scale_y = (float)STT_fabs(scale_y);
+   float scale = abs_scale_x > abs_scale_y ? abs_scale_y : abs_scale_x;
    int winding_count      = 0;
    int *winding_lengths   = NULL;
-   stt__point *windings = stt_FlattenCurves(vertices, num_verts, flatness_in_pixels / scale, &winding_lengths, &winding_count, userdata);
+   stt__point *windings;
+   if (!result || !result->pixels || result->w <= 0 || result->h <= 0 ||
+       result->stride < result->w || !vertices || num_verts <= 0 ||
+       num_verts > STT_MAX_TESSELLATION_POINTS ||
+       (size_t)result->stride > ((size_t)-1)/(size_t)result->h ||
+       (size_t)result->w > ((size_t)-1)/(size_t)result->h ||
+       (size_t)result->w*(size_t)result->h > STT_MAX_BITMAP_PIXELS ||
+       !(scale > 0.0f) || !(scale <= 3.4e38f) ||
+       !(flatness_in_pixels > 0.0f) ||
+       !(flatness_in_pixels <= 3.4e38f) ||
+       !(shift_x >= -3.4e38f && shift_x <= 3.4e38f) ||
+       !(shift_y >= -3.4e38f && shift_y <= 3.4e38f) ||
+       y_off > 0x7fffffff-result->h ||
+       y_off < (-2147483647-1)+result->h) return;
+   windings = stt_FlattenCurves(vertices, num_verts,
+                               flatness_in_pixels/scale,
+                               &winding_lengths, &winding_count, userdata);
    if (windings) {
       stt__rasterize(result, windings, winding_lengths, winding_count, scale_x, scale_y, shift_x, shift_y, x_off, y_off, invert, userdata);
       STT_free(winding_lengths, userdata);
@@ -3824,7 +4206,14 @@ STT_DEF unsigned char *stt_GetGlyphBitmapSubpixel(const stt_fontinfo *info, floa
    int ix0,iy0,ix1,iy1;
    stt__bitmap gbm;
    stt_vertex *vertices;
-   int num_verts = stt_GetGlyphShape(info, glyph, &vertices);
+   int num_verts;
+
+   if (width) *width = 0;
+   if (height) *height = 0;
+   if (xoff) *xoff = 0;
+   if (yoff) *yoff = 0;
+   if (!info || glyph < 0 || glyph >= info->numGlyphs) return NULL;
+   num_verts = stt_GetGlyphShape(info, glyph, &vertices);
 
    if (scale_x == 0) scale_x = scale_y;
    if (scale_y == 0) {
@@ -3838,8 +4227,14 @@ STT_DEF unsigned char *stt_GetGlyphBitmapSubpixel(const stt_fontinfo *info, floa
    stt_GetGlyphBitmapBoxSubpixel(info, glyph, scale_x, scale_y, shift_x, shift_y, &ix0,&iy0,&ix1,&iy1);
 
    // now we get the size
-   gbm.w = (ix1 - ix0);
-   gbm.h = (iy1 - iy0);
+   if (ix1 <= ix0 || iy1 <= iy0 ||
+       (long long)ix1-ix0 > 0x7fffffffLL ||
+       (long long)iy1-iy0 > 0x7fffffffLL) {
+      STT_free(vertices, info->userdata);
+      return NULL;
+   }
+   gbm.w = ix1-ix0;
+   gbm.h = iy1-iy0;
    gbm.pixels = NULL; // in case we error
 
    if (width ) *width  = gbm.w;
@@ -3847,8 +4242,10 @@ STT_DEF unsigned char *stt_GetGlyphBitmapSubpixel(const stt_fontinfo *info, floa
    if (xoff  ) *xoff   = ix0;
    if (yoff  ) *yoff   = iy0;
 
-   if (gbm.w && gbm.h) {
-      gbm.pixels = (unsigned char *) STT_malloc(gbm.w * gbm.h, info->userdata);
+   if ((size_t)gbm.w <= ((size_t)-1)/(size_t)gbm.h &&
+       (size_t)gbm.w*(size_t)gbm.h <= STT_MAX_BITMAP_PIXELS) {
+      gbm.pixels = (unsigned char *)STT_malloc(
+         (size_t)gbm.w*(size_t)gbm.h, info->userdata);
       if (gbm.pixels) {
          gbm.stride = gbm.w;
 
@@ -3868,8 +4265,12 @@ STT_DEF void stt_MakeGlyphBitmapSubpixel(const stt_fontinfo *info, unsigned char
 {
    int ix0,iy0;
    stt_vertex *vertices;
-   int num_verts = stt_GetGlyphShape(info, glyph, &vertices);
+   int num_verts;
    stt__bitmap gbm;
+
+   if (!info || !output || out_w <= 0 || out_h <= 0 ||
+       out_stride < out_w || glyph < 0 || glyph >= info->numGlyphs) return;
+   num_verts = stt_GetGlyphShape(info, glyph, &vertices);
 
    stt_GetGlyphBitmapBoxSubpixel(info, glyph, scale_x, scale_y, shift_x, shift_y, &ix0,&iy0,0,0);
    gbm.pixels = output;
@@ -3877,7 +4278,7 @@ STT_DEF void stt_MakeGlyphBitmapSubpixel(const stt_fontinfo *info, unsigned char
    gbm.h = out_h;
    gbm.stride = out_stride;
 
-   if (gbm.w && gbm.h)
+   if (gbm.w > 0 && gbm.h > 0)
       stt_Rasterize(&gbm, 0.35f, vertices, num_verts, scale_x, scale_y, shift_x, shift_y, ix0,iy0, 1, info->userdata);
 
    STT_free(vertices, info->userdata);
@@ -3928,10 +4329,16 @@ static int stt_BakeFontBitmap_internal(unsigned char *data, int data_size, int o
    float scale;
    int x,y,bottom_y, i;
    stt_fontinfo f;
-   f.userdata = NULL;
+   if (!data || data_size <= 0 || !pixels || !chardata || pw <= 2 ||
+       ph <= 2 || pw > 65535 || ph > 65535 || num_chars <= 0 ||
+       first_char < 0 || !(pixel_height > 0.0f) ||
+       (size_t)pw > ((size_t)-1)/(size_t)ph ||
+       (size_t)pw*(size_t)ph > STT_MAX_BITMAP_PIXELS)
+      return 0;
    if (!stt_InitFont(&f, data, data_size, offset))
       return -1;
-   STT_memset(pixels, 0, pw*ph); // background of 0 around pixels
+   f.userdata = NULL;
+   STT_memset(pixels, 0, (size_t)pw*(size_t)ph);
    x=y=1;
    bottom_y = 1;
 
@@ -3939,17 +4346,23 @@ static int stt_BakeFontBitmap_internal(unsigned char *data, int data_size, int o
 
    for (i=0; i < num_chars; ++i) {
       int advance, lsb, x0,y0,x1,y1,gw,gh;
-      int g = stt_FindGlyphIndex(&f, first_char + i);
+      long long gw64, gh64;
+      int g;
+      if (first_char > 0x7fffffff-i)
+         return -i;
+      g = stt_FindGlyphIndex(&f, first_char + i);
       stt_GetGlyphHMetrics(&f, g, &advance, &lsb);
       stt_GetGlyphBitmapBox(&f, g, scale,scale, &x0,&y0,&x1,&y1);
-      gw = x1-x0;
-      gh = y1-y0;
-      if (x + gw + 1 >= pw)
-         y = bottom_y, x = 1; // advance to next row
-      if (y + gh + 1 >= ph) // check if it fits vertically AFTER potentially moving to next row
+      gw64 = (long long)x1-(long long)x0;
+      gh64 = (long long)y1-(long long)y0;
+      if (gw64 < 0 || gh64 < 0 || gw64 >= pw-1 || gh64 >= ph-1)
          return -i;
-      STT_assert(x+gw < pw);
-      STT_assert(y+gh < ph);
+      gw = (int)gw64;
+      gh = (int)gh64;
+      if (gw >= pw-x-1)
+         y = bottom_y, x = 1; // advance to next row
+      if (y >= ph-gh-1)
+         return -i;
       stt_MakeGlyphBitmap(&f, pixels+x+y*pw, gw,gh,pw, scale,scale, g);
       chardata[i].x0 = (stt_int16) x;
       chardata[i].y0 = (stt_int16) y;
@@ -3968,8 +4381,16 @@ static int stt_BakeFontBitmap_internal(unsigned char *data, int data_size, int o
 STT_DEF void stt_GetBakedQuad(const stt_bakedchar *chardata, int pw, int ph, int char_index, float *xpos, float *ypos, stt_aligned_quad *q, int opengl_fillrule)
 {
    float d3d_bias = opengl_fillrule ? 0 : -0.5f;
-   float ipw = 1.0f / pw, iph = 1.0f / ph;
-   const stt_bakedchar *b = chardata + char_index;
+   float ipw, iph;
+   const stt_bakedchar *b;
+   if (!chardata || !xpos || !ypos || !q || pw <= 0 || ph <= 0 ||
+       char_index < 0) {
+      if (q) STT_memset(q, 0, sizeof(*q));
+      return;
+   }
+   ipw = 1.0f / pw;
+   iph = 1.0f / ph;
+   b = chardata + char_index;
    int round_x = STT_ifloor((*xpos + b->xoff) + 0.5f);
    int round_y = STT_ifloor((*ypos + b->yoff) + 0.5f);
 
@@ -4002,7 +4423,7 @@ typedef int stbrp_coord;
 //                                                                                //
 //                                                                                //
 // if you get a compile warning due to these symbols being defined more than      //
-// once, move #include "stb_rect_pack.h" before #include "stb_truetype.h"         //
+// once, move #include "stb_rect_pack.h" before #include "struetype.h"            //
 //                                                                                //
 ////////////////////////////////////////////////////////////////////////////////////
 
@@ -4025,6 +4446,7 @@ struct stbrp_rect
 
 static void stbrp_init_target(stbrp_context *con, int pw, int ph, stbrp_node *nodes, int num_nodes)
 {
+   if (!con) return;
    con->width  = pw;
    con->height = ph;
    con->x = 0;
@@ -4037,13 +4459,24 @@ static void stbrp_init_target(stbrp_context *con, int pw, int ph, stbrp_node *no
 static void stbrp_pack_rects(stbrp_context *con, stbrp_rect *rects, int num_rects)
 {
    int i;
+   if (!con || !rects || num_rects <= 0) return;
    for (i=0; i < num_rects; ++i) {
-      if (con->x + rects[i].w > con->width) {
+      rects[i].was_packed = 0;
+      if (rects[i].w == 0 && rects[i].h == 0) {
+         rects[i].x = con->x;
+         rects[i].y = con->y;
+         rects[i].was_packed = 1;
+         continue;
+      }
+      if (rects[i].w <= 0 || rects[i].h <= 0 ||
+          rects[i].w > con->width || rects[i].h > con->height)
+         continue;
+      if (con->x > con->width-rects[i].w) {
          con->x = 0;
          con->y = con->bottom_y;
       }
-      if (con->y + rects[i].h > con->height)
-         break;
+      if (con->y > con->height-rects[i].h)
+         continue;
       rects[i].x = con->x;
       rects[i].y = con->y;
       rects[i].was_packed = 1;
@@ -4065,9 +4498,26 @@ static void stbrp_pack_rects(stbrp_context *con, stbrp_rect *rects, int num_rect
 
 STT_DEF int stt_PackBegin(stt_pack_context *spc, unsigned char *pixels, int pw, int ph, int stride_in_bytes, int padding, void *alloc_context)
 {
-   stbrp_context *context = (stbrp_context *) STT_malloc(sizeof(*context)            ,alloc_context);
-   int            num_nodes = pw - padding;
-   stbrp_node    *nodes   = (stbrp_node    *) STT_malloc(sizeof(*nodes  ) * num_nodes,alloc_context);
+   stbrp_context *context;
+   stbrp_node *nodes;
+   int num_nodes, stride, row;
+
+   if (!spc) return 0;
+   STT_memset(spc, 0, sizeof(*spc));
+   stride = stride_in_bytes != 0 ? stride_in_bytes : pw;
+   if (pw <= 0 || ph <= 0 || pw > 65535 || ph > 65535 || padding < 0 ||
+       padding >= pw || padding >= ph || stride < pw ||
+       (size_t)pw > ((size_t)-1)/(size_t)ph ||
+       (size_t)pw*(size_t)ph > STT_MAX_BITMAP_PIXELS ||
+       (size_t)stride > ((size_t)-1)/(size_t)ph)
+      return 0;
+
+   num_nodes = pw-padding;
+   if ((size_t)num_nodes > ((size_t)-1)/sizeof(*nodes))
+      return 0;
+   context = (stbrp_context *)STT_malloc(sizeof(*context), alloc_context);
+   nodes = (stbrp_node *)STT_malloc(sizeof(*nodes)*(size_t)num_nodes,
+                                    alloc_context);
 
    if (context == NULL || nodes == NULL) {
       if (context != NULL) STT_free(context, alloc_context);
@@ -4082,7 +4532,7 @@ STT_DEF int stt_PackBegin(stt_pack_context *spc, unsigned char *pixels, int pw, 
    spc->pack_info = context;
    spc->nodes = nodes;
    spc->padding = padding;
-   spc->stride_in_bytes = stride_in_bytes != 0 ? stride_in_bytes : pw;
+   spc->stride_in_bytes = stride;
    spc->h_oversample = 1;
    spc->v_oversample = 1;
    spc->skip_missing = 0;
@@ -4090,29 +4540,33 @@ STT_DEF int stt_PackBegin(stt_pack_context *spc, unsigned char *pixels, int pw, 
    stbrp_init_target(context, pw-padding, ph-padding, nodes, num_nodes);
 
    if (pixels)
-      STT_memset(pixels, 0, pw*ph); // background of 0 around pixels
+      for (row = 0; row < ph; ++row)
+         STT_memset(pixels+(size_t)row*(size_t)stride, 0, (size_t)pw);
 
    return 1;
 }
 
 STT_DEF void stt_PackEnd  (stt_pack_context *spc)
 {
+   if (!spc) return;
    STT_free(spc->nodes    , spc->user_allocator_context);
    STT_free(spc->pack_info, spc->user_allocator_context);
+   spc->nodes = NULL;
+   spc->pack_info = NULL;
 }
 
 STT_DEF void stt_PackSetOversampling(stt_pack_context *spc, unsigned int h_oversample, unsigned int v_oversample)
 {
-   STT_assert(h_oversample <= STT_MAX_OVERSAMPLE);
-   STT_assert(v_oversample <= STT_MAX_OVERSAMPLE);
-   if (h_oversample <= STT_MAX_OVERSAMPLE)
+   if (!spc) return;
+   if (h_oversample > 0 && h_oversample <= STT_MAX_OVERSAMPLE)
       spc->h_oversample = h_oversample;
-   if (v_oversample <= STT_MAX_OVERSAMPLE)
+   if (v_oversample > 0 && v_oversample <= STT_MAX_OVERSAMPLE)
       spc->v_oversample = v_oversample;
 }
 
 STT_DEF void stt_PackSetSkipMissingCodepoints(stt_pack_context *spc, int skip)
 {
+   if (!spc) return;
    spc->skip_missing = skip;
 }
 
@@ -4123,6 +4577,9 @@ static void stt__h_prefilter(unsigned char *pixels, int w, int h, int stride_in_
    unsigned char buffer[STT_MAX_OVERSAMPLE];
    int safe_w = w - kernel_width;
    int j;
+   if (!pixels || w <= 0 || h <= 0 || stride_in_bytes < w ||
+       kernel_width == 0 || kernel_width > STT_MAX_OVERSAMPLE ||
+       kernel_width > (unsigned int)w) return;
    STT_memset(buffer, 0, STT_MAX_OVERSAMPLE); // suppress bogus warning from VS2013 -analyze
    for (j=0; j < h; ++j) {
       int i;
@@ -4185,6 +4642,9 @@ static void stt__v_prefilter(unsigned char *pixels, int w, int h, int stride_in_
    unsigned char buffer[STT_MAX_OVERSAMPLE];
    int safe_h = h - kernel_width;
    int j;
+   if (!pixels || w <= 0 || h <= 0 || stride_in_bytes < w ||
+       kernel_width == 0 || kernel_width > STT_MAX_OVERSAMPLE ||
+       kernel_width > (unsigned int)h) return;
    STT_memset(buffer, 0, STT_MAX_OVERSAMPLE); // suppress bogus warning from VS2013 -analyze
    for (j=0; j < w; ++j) {
       int i;
@@ -4260,16 +4720,37 @@ STT_DEF int stt_PackFontRangesGatherRects(stt_pack_context *spc, const stt_fonti
    int i,j,k;
    int missing_glyph_added = 0;
 
+   if (!spc || !info || !ranges || !rects || num_ranges <= 0 ||
+       spc->padding < 0 || spc->h_oversample == 0 ||
+       spc->v_oversample == 0 ||
+       spc->h_oversample > STT_MAX_OVERSAMPLE ||
+       spc->v_oversample > STT_MAX_OVERSAMPLE)
+      return 0;
    k=0;
    for (i=0; i < num_ranges; ++i) {
       float fh = ranges[i].font_size;
       float scale = fh > 0 ? stt_ScaleForPixelHeight(info, fh) : stt_ScaleForMappingEmToPixels(info, -fh);
+      if (ranges[i].num_chars < 0 ||
+          (ranges[i].num_chars > 0 && !ranges[i].chardata_for_range) ||
+          fh == 0.0f || fh != fh)
+         return 0;
       ranges[i].h_oversample = (unsigned char) spc->h_oversample;
       ranges[i].v_oversample = (unsigned char) spc->v_oversample;
       for (j=0; j < ranges[i].num_chars; ++j) {
          int x0,y0,x1,y1;
-         int codepoint = ranges[i].array_of_unicode_codepoints == NULL ? ranges[i].first_unicode_codepoint_in_range + j : ranges[i].array_of_unicode_codepoints[j];
-         int glyph = stt_FindGlyphIndex(info, codepoint);
+         int codepoint;
+         int glyph;
+         int rw, rh;
+         long long rw64, rh64;
+         if (ranges[i].array_of_unicode_codepoints == NULL) {
+            if (ranges[i].first_unicode_codepoint_in_range >
+                0x7fffffff-j)
+               return 0;
+            codepoint = ranges[i].first_unicode_codepoint_in_range+j;
+         } else {
+            codepoint = ranges[i].array_of_unicode_codepoints[j];
+         }
+         glyph = stt_FindGlyphIndex(info, codepoint);
          if (glyph == 0 && (spc->skip_missing || missing_glyph_added)) {
             rects[k].w = rects[k].h = 0;
          } else {
@@ -4278,8 +4759,19 @@ STT_DEF int stt_PackFontRangesGatherRects(stt_pack_context *spc, const stt_fonti
                                             scale * spc->v_oversample,
                                             0,0,
                                             &x0,&y0,&x1,&y1);
-            rects[k].w = (stbrp_coord) (x1-x0 + spc->padding + spc->h_oversample-1);
-            rects[k].h = (stbrp_coord) (y1-y0 + spc->padding + spc->v_oversample-1);
+            rw64 = (long long)x1-(long long)x0+spc->padding+
+                   (int)spc->h_oversample-1;
+            rh64 = (long long)y1-(long long)y0+spc->padding+
+                   (int)spc->v_oversample-1;
+            if (rw64 < 0 || rh64 < 0 || rw64 > 0x7fffffffLL ||
+                rh64 > 0x7fffffffLL)
+               return 0;
+            rw = (int)rw64;
+            rh = (int)rh64;
+            rects[k].w = (stbrp_coord)rw;
+            rects[k].h = (stbrp_coord)rh;
+            if ((int)rects[k].w != rw || (int)rects[k].h != rh)
+               return 0;
             if (glyph == 0)
                missing_glyph_added = 1;
          }
@@ -4292,6 +4784,14 @@ STT_DEF int stt_PackFontRangesGatherRects(stt_pack_context *spc, const stt_fonti
 
 STT_DEF void stt_MakeGlyphBitmapSubpixelPrefilter(const stt_fontinfo *info, unsigned char *output, int out_w, int out_h, int out_stride, float scale_x, float scale_y, float shift_x, float shift_y, int prefilter_x, int prefilter_y, float *sub_x, float *sub_y, int glyph)
 {
+   if (sub_x) *sub_x = 0.0f;
+   if (sub_y) *sub_y = 0.0f;
+   if (!info || !output || !sub_x || !sub_y || out_w <= 0 || out_h <= 0 ||
+       out_stride < out_w || prefilter_x <= 0 || prefilter_y <= 0 ||
+       prefilter_x > STT_MAX_OVERSAMPLE ||
+       prefilter_y > STT_MAX_OVERSAMPLE || prefilter_x > out_w ||
+       prefilter_y > out_h || glyph < 0 || glyph >= info->numGlyphs)
+      return;
    stt_MakeGlyphBitmapSubpixel(info,
                                  output,
                                  out_w - (prefilter_x - 1),
@@ -4316,17 +4816,37 @@ STT_DEF void stt_MakeGlyphBitmapSubpixelPrefilter(const stt_fontinfo *info, unsi
 // rects array must be big enough to accommodate all characters in the given ranges
 STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_fontinfo *info, stt_pack_range *ranges, int num_ranges, stbrp_rect *rects)
 {
-   int i,j,k, missing_glyph = -1, return_value = 1;
+   int i,j,k, have_missing_glyph = 0, return_value = 1;
+   stt_packedchar missing_glyph;
+   int old_h_over, old_v_over;
 
-   // save current values
-   int old_h_over = spc->h_oversample;
-   int old_v_over = spc->v_oversample;
-
+   if (!spc || !info || !ranges || !rects || !spc->pixels ||
+       !spc->pack_info || num_ranges <= 0 || spc->width <= 0 ||
+       spc->height <= 0 || spc->stride_in_bytes < spc->width ||
+       (size_t)spc->stride_in_bytes >
+          ((size_t)-1)/(size_t)spc->height ||
+       spc->padding < 0 || spc->h_oversample == 0 ||
+       spc->v_oversample == 0 ||
+       spc->h_oversample > STT_MAX_OVERSAMPLE ||
+       spc->v_oversample > STT_MAX_OVERSAMPLE)
+      return 0;
+   STT_memset(&missing_glyph, 0, sizeof(missing_glyph));
+   old_h_over = (int)spc->h_oversample;
+   old_v_over = (int)spc->v_oversample;
    k = 0;
    for (i=0; i < num_ranges; ++i) {
       float fh = ranges[i].font_size;
       float scale = fh > 0 ? stt_ScaleForPixelHeight(info, fh) : stt_ScaleForMappingEmToPixels(info, -fh);
       float recip_h,recip_v,sub_x,sub_y;
+      if (ranges[i].num_chars < 0 ||
+          (ranges[i].num_chars > 0 && !ranges[i].chardata_for_range) ||
+          ranges[i].h_oversample == 0 || ranges[i].v_oversample == 0 ||
+          ranges[i].h_oversample > STT_MAX_OVERSAMPLE ||
+          ranges[i].v_oversample > STT_MAX_OVERSAMPLE ||
+          fh == 0.0f || fh != fh) {
+         return_value = 0;
+         break;
+      }
       spc->h_oversample = ranges[i].h_oversample;
       spc->v_oversample = ranges[i].v_oversample;
       recip_h = 1.0f / spc->h_oversample;
@@ -4338,9 +4858,28 @@ STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_f
          if (r->was_packed && r->w != 0 && r->h != 0) {
             stt_packedchar *bc = &ranges[i].chardata_for_range[j];
             int advance, lsb, x0,y0,x1,y1;
-            int codepoint = ranges[i].array_of_unicode_codepoints == NULL ? ranges[i].first_unicode_codepoint_in_range + j : ranges[i].array_of_unicode_codepoints[j];
-            int glyph = stt_FindGlyphIndex(info, codepoint);
+            int codepoint;
+            int glyph;
             stbrp_coord pad = (stbrp_coord) spc->padding;
+
+            if (r->x < 0 || r->y < 0 || r->w < pad || r->h < pad ||
+                r->x > spc->width-r->w || r->y > spc->height-r->h) {
+               return_value = 0;
+               ++k;
+               continue;
+            }
+            if (ranges[i].array_of_unicode_codepoints == NULL) {
+               if (ranges[i].first_unicode_codepoint_in_range >
+                   0x7fffffff-j) {
+                  return_value = 0;
+                  ++k;
+                  continue;
+               }
+               codepoint = ranges[i].first_unicode_codepoint_in_range+j;
+            } else {
+               codepoint = ranges[i].array_of_unicode_codepoints[j];
+            }
+            glyph = stt_FindGlyphIndex(info, codepoint);
 
             // pad on left and top
             r->x += pad;
@@ -4353,7 +4892,8 @@ STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_f
                                     scale * spc->v_oversample,
                                     &x0,&y0,&x1,&y1);
             stt_MakeGlyphBitmapSubpixel(info,
-                                          spc->pixels + r->x + r->y*spc->stride_in_bytes,
+                                          spc->pixels+(size_t)r->x+
+                                          (size_t)r->y*(size_t)spc->stride_in_bytes,
                                           r->w - spc->h_oversample+1,
                                           r->h - spc->v_oversample+1,
                                           spc->stride_in_bytes,
@@ -4363,12 +4903,14 @@ STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_f
                                           glyph);
 
             if (spc->h_oversample > 1)
-               stt__h_prefilter(spc->pixels + r->x + r->y*spc->stride_in_bytes,
+               stt__h_prefilter(spc->pixels+(size_t)r->x+
+                                  (size_t)r->y*(size_t)spc->stride_in_bytes,
                                   r->w, r->h, spc->stride_in_bytes,
                                   spc->h_oversample);
 
             if (spc->v_oversample > 1)
-               stt__v_prefilter(spc->pixels + r->x + r->y*spc->stride_in_bytes,
+               stt__v_prefilter(spc->pixels+(size_t)r->x+
+                                  (size_t)r->y*(size_t)spc->stride_in_bytes,
                                   r->w, r->h, spc->stride_in_bytes,
                                   spc->v_oversample);
 
@@ -4382,12 +4924,15 @@ STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_f
             bc->xoff2    =                (x0 + r->w) * recip_h + sub_x;
             bc->yoff2    =                (y0 + r->h) * recip_v + sub_y;
 
-            if (glyph == 0)
-               missing_glyph = j;
+            if (glyph == 0) {
+               missing_glyph = *bc;
+               have_missing_glyph = 1;
+            }
          } else if (spc->skip_missing) {
             return_value = 0;
-         } else if (r->was_packed && r->w == 0 && r->h == 0 && missing_glyph >= 0) {
-            ranges[i].chardata_for_range[j] = ranges[i].chardata_for_range[missing_glyph];
+         } else if (r->was_packed && r->w == 0 && r->h == 0 &&
+                    have_missing_glyph) {
+            ranges[i].chardata_for_range[j] = missing_glyph;
          } else {
             return_value = 0; // if any fail, report failure
          }
@@ -4405,15 +4950,31 @@ STT_DEF int stt_PackFontRangesRenderIntoRects(stt_pack_context *spc, const stt_f
 
 STT_DEF void stt_PackFontRangesPackRects(stt_pack_context *spc, stbrp_rect *rects, int num_rects)
 {
+   if (!spc || !spc->pack_info || !rects || num_rects <= 0) return;
    stbrp_pack_rects((stbrp_context *) spc->pack_info, rects, num_rects);
 }
 
 STT_DEF int stt_PackFontRanges(stt_pack_context *spc, const unsigned char *fontdata, int fontdata_size, int font_index, stt_pack_range *ranges, int num_ranges)
 {
    stt_fontinfo info;
-   int i,j,n, return_value = 1;
+   int i,j,n,offset, return_value = 1;
    //stbrp_context *context = (stbrp_context *) spc->pack_info;
    stbrp_rect    *rects;
+
+   if (!spc || !spc->pack_info || !spc->nodes || !spc->pixels ||
+       !fontdata || fontdata_size <= 0 || font_index < 0 || !ranges ||
+       num_ranges <= 0)
+      return 0;
+
+   n = 0;
+   for (i=0; i < num_ranges; ++i) {
+      if (ranges[i].num_chars < 0 ||
+          (ranges[i].num_chars > 0 && !ranges[i].chardata_for_range) ||
+          ranges[i].num_chars > 0x7fffffff-n)
+         return 0;
+      n += ranges[i].num_chars;
+   }
+   if (n == 0) return 1;
 
    // flag all characters as NOT packed
    for (i=0; i < num_ranges; ++i)
@@ -4423,18 +4984,24 @@ STT_DEF int stt_PackFontRanges(stt_pack_context *spc, const unsigned char *fontd
          ranges[i].chardata_for_range[j].x1 =
          ranges[i].chardata_for_range[j].y1 = 0;
 
-   n = 0;
-   for (i=0; i < num_ranges; ++i)
-      n += ranges[i].num_chars;
-
-   rects = (stbrp_rect *) STT_malloc(sizeof(*rects) * n, spc->user_allocator_context);
+   if ((size_t)n > ((size_t)-1)/sizeof(*rects)) return 0;
+   rects = (stbrp_rect *)STT_malloc(sizeof(*rects)*(size_t)n,
+                                    spc->user_allocator_context);
    if (rects == NULL)
       return 0;
 
+   offset = stt_GetFontOffsetForIndex(fontdata, fontdata_size, font_index);
+   if (offset < 0 || !stt_InitFont(&info, fontdata, fontdata_size, offset)) {
+      STT_free(rects, spc->user_allocator_context);
+      return 0;
+   }
    info.userdata = spc->user_allocator_context;
-   stt_InitFont(&info, fontdata, fontdata_size, stt_GetFontOffsetForIndex(fontdata,font_index));
 
-   n = stt_PackFontRangesGatherRects(spc, &info, ranges, num_ranges, rects);
+   if (stt_PackFontRangesGatherRects(spc, &info, ranges, num_ranges,
+                                     rects) != n) {
+      STT_free(rects, spc->user_allocator_context);
+      return 0;
+   }
 
    stt_PackFontRangesPackRects(spc, rects, n);
 
@@ -4448,6 +5015,9 @@ STT_DEF int stt_PackFontRange(stt_pack_context *spc, const unsigned char *fontda
             int first_unicode_codepoint_in_range, int num_chars_in_range, stt_packedchar *chardata_for_range)
 {
    stt_pack_range range;
+   if (num_chars_in_range < 0 ||
+       (num_chars_in_range > 0 && !chardata_for_range))
+      return 0;
    range.first_unicode_codepoint_in_range = first_unicode_codepoint_in_range;
    range.array_of_unicode_codepoints = NULL;
    range.num_chars                   = num_chars_in_range;
@@ -4461,7 +5031,15 @@ STT_DEF void stt_GetScaledFontVMetrics(const unsigned char *fontdata, int fontda
    int i_ascent, i_descent, i_lineGap;
    float scale;
    stt_fontinfo info;
-   stt_InitFont(&info, fontdata, fontdata_size, stt_GetFontOffsetForIndex(fontdata, index));
+   int offset;
+   if (ascent) *ascent = 0.0f;
+   if (descent) *descent = 0.0f;
+   if (lineGap) *lineGap = 0.0f;
+   if (!fontdata || fontdata_size <= 0 || index < 0 || !ascent ||
+       !descent || !lineGap || size == 0.0f || size != size) return;
+   offset = stt_GetFontOffsetForIndex(fontdata, fontdata_size, index);
+   if (offset < 0 || !stt_InitFont(&info, fontdata, fontdata_size, offset))
+      return;
    scale = size > 0 ? stt_ScaleForPixelHeight(&info, size) : stt_ScaleForMappingEmToPixels(&info, -size);
    stt_GetFontVMetrics(&info, &i_ascent, &i_descent, &i_lineGap);
    *ascent  = (float) i_ascent  * scale;
@@ -4471,8 +5049,16 @@ STT_DEF void stt_GetScaledFontVMetrics(const unsigned char *fontdata, int fontda
 
 STT_DEF void stt_GetPackedQuad(const stt_packedchar *chardata, int pw, int ph, int char_index, float *xpos, float *ypos, stt_aligned_quad *q, int align_to_integer)
 {
-   float ipw = 1.0f / pw, iph = 1.0f / ph;
-   const stt_packedchar *b = chardata + char_index;
+   float ipw, iph;
+   const stt_packedchar *b;
+   if (!chardata || !xpos || !ypos || !q || pw <= 0 || ph <= 0 ||
+       char_index < 0) {
+      if (q) STT_memset(q, 0, sizeof(*q));
+      return;
+   }
+   ipw = 1.0f / pw;
+   iph = 1.0f / ph;
+   b = chardata + char_index;
 
    if (align_to_integer) {
       float x = (float) STT_ifloor((*xpos + b->xoff) + 0.5f);
@@ -4535,6 +5121,7 @@ static int stt__ray_intersect_bezier(float orig[2], float ray[2], float q0[2], f
    } else {
       // 2*b*s + c = 0
       // s = -c / (2*b)
+      if (b == 0.0f) return 0;
       s0 = c / (-2 * b);
       if (s0 >= 0.0 && s0 <= 1.0)
          num_s = 1;
@@ -4592,7 +5179,7 @@ static int stt__compute_crossings_x(float x, float y, int nverts, stt_vertex *ve
 
    // test a ray from (-infinity,y) to (x,y)
    for (i=0; i < nverts; ++i) {
-      if (verts[i].type == STT_vline) {
+      if (i > 0 && verts[i].type == STT_vline) {
          int x0 = (int) verts[i-1].x, y0 = (int) verts[i-1].y;
          int x1 = (int) verts[i  ].x, y1 = (int) verts[i  ].y;
          if (y > STT_min(y0,y1) && y < STT_max(y0,y1) && x > STT_min(x0,x1)) {
@@ -4601,7 +5188,7 @@ static int stt__compute_crossings_x(float x, float y, int nverts, stt_vertex *ve
                winding += (y0 < y1) ? 1 : -1;
          }
       }
-      if (verts[i].type == STT_vcurve) {
+      if (i > 0 && verts[i].type == STT_vcurve) {
          int x0 = (int) verts[i-1].x , y0 = (int) verts[i-1].y ;
          int x1 = (int) verts[i  ].cx, y1 = (int) verts[i  ].cy;
          int x2 = (int) verts[i  ].x , y2 = (int) verts[i  ].y ;
@@ -4688,7 +5275,12 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
    int w,h;
    unsigned char *data;
 
-   if (scale == 0) return NULL;
+   if (width) *width = 0;
+   if (height) *height = 0;
+   if (xoff) *xoff = 0;
+   if (yoff) *yoff = 0;
+   if (!info || glyph < 0 || glyph >= info->numGlyphs ||
+       !(scale != 0.0f) || padding < 0) return NULL;
 
    stt_GetGlyphBitmapBoxSubpixel(info, glyph, scale, scale, 0.0f,0.0f, &ix0,&iy0,&ix1,&iy1);
 
@@ -4696,13 +5288,21 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
    if (ix0 == ix1 || iy0 == iy1)
       return NULL;
 
+   if (ix0 < (-2147483647-1)+padding || iy0 < (-2147483647-1)+padding ||
+       ix1 > 2147483647-padding || iy1 > 2147483647-padding)
+      return NULL;
    ix0 -= padding;
    iy0 -= padding;
    ix1 += padding;
    iy1 += padding;
 
-   w = (ix1 - ix0);
-   h = (iy1 - iy0);
+   if (ix1 <= ix0 || iy1 <= iy0 ||
+       (long long)ix1-ix0 > 0x7fffffffLL ||
+       (long long)iy1-iy0 > 0x7fffffffLL) return NULL;
+   w = ix1-ix0;
+   h = iy1-iy0;
+   if ((size_t)w > ((size_t)-1)/(size_t)h ||
+       (size_t)w*(size_t)h > STT_MAX_BITMAP_PIXELS) return NULL;
 
    if (width ) *width  = w;
    if (height) *height = h;
@@ -4719,8 +5319,21 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
       float *precompute;
       stt_vertex *verts;
       int num_verts = stt_GetGlyphShape(info, glyph, &verts);
-      data = (unsigned char *) STT_malloc(w * h, info->userdata);
-      precompute = (float *) STT_malloc(num_verts * sizeof(float), info->userdata);
+      if (num_verts <= 0 || !verts ||
+          (size_t)num_verts > ((size_t)-1)/sizeof(float)) {
+         if (verts) STT_free(verts, info->userdata);
+         return NULL;
+      }
+      data = (unsigned char *)STT_malloc((size_t)w*(size_t)h,
+                                         info->userdata);
+      precompute = (float *)STT_malloc((size_t)num_verts*sizeof(float),
+                                       info->userdata);
+      if (!data || !precompute) {
+         if (data) STT_free(data, info->userdata);
+         if (precompute) STT_free(precompute, info->userdata);
+         STT_free(verts, info->userdata);
+         return NULL;
+      }
 
       for (i=0,j=num_verts-1; i < num_verts; j=i++) {
          if (verts[i].type == STT_vline) {
@@ -4756,7 +5369,7 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
             for (i=0; i < num_verts; ++i) {
                float x0 = verts[i].x*scale_x, y0 = verts[i].y*scale_y;
 
-               if (verts[i].type == STT_vline && precompute[i] != 0.0f) {
+               if (i > 0 && verts[i].type == STT_vline && precompute[i] != 0.0f) {
                   float x1 = verts[i-1].x*scale_x, y1 = verts[i-1].y*scale_y;
 
                   float dist,dist2 = (x0-sx)*(x0-sx) + (y0-sy)*(y0-sy);
@@ -4767,7 +5380,6 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
                   //if (sx > STT_min(x0,x1)-min_dist && sx < STT_max(x0,x1)+min_dist &&
                   //    sy > STT_min(y0,y1)-min_dist && sy < STT_max(y0,y1)+min_dist)
                   dist = (float) STT_fabs((x1-x0)*(y0-sy) - (y1-y0)*(x0-sx)) * precompute[i];
-                  STT_assert(i != 0);
                   if (dist < min_dist) {
                      // check position along line
                      // x' = x0 + t*(x1-x0), y' = y0 + t*(y1-y0)
@@ -4780,7 +5392,7 @@ STT_DEF unsigned char * stt_GetGlyphSDF(const stt_fontinfo *info, float scale, i
                      if (t >= 0.0f && t <= 1.0f)
                         min_dist = dist;
                   }
-               } else if (verts[i].type == STT_vcurve) {
+               } else if (i > 0 && verts[i].type == STT_vcurve) {
                   float x2 = verts[i-1].x *scale_x, y2 = verts[i-1].y *scale_y;
                   float x1 = verts[i  ].cx*scale_x, y1 = verts[i  ].cy*scale_y;
                   float box_x0 = STT_min(STT_min(x0,x1),x2);
@@ -4888,6 +5500,9 @@ static stt_int32 stt__CompareUTF8toUTF16_bigendian_prefix(stt_uint8 *s1, stt_int
 {
    stt_int32 i=0;
 
+   if (!s1 || !s2 || len1 < 0 || len2 < 0 || (len2 & 1))
+      return -1;
+
    // convert utf16 to utf8 and compare the results while converting
    while (len2) {
       stt_uint16 ch = s2[0]*256 + s2[1];
@@ -4900,7 +5515,9 @@ static stt_int32 stt__CompareUTF8toUTF16_bigendian_prefix(stt_uint8 *s1, stt_int
          if (s1[i++] != 0x80 + (ch & 0x3f)) return -1;
       } else if (ch >= 0xd800 && ch < 0xdc00) {
          stt_uint32 c;
+         if (len2 < 4) return -1;
          stt_uint16 ch2 = s2[2]*256 + s2[3];
+         if (ch2 < 0xdc00 || ch2 >= 0xe000) return -1;
          if (i+3 >= len1) return -1;
          c = ((ch - 0xd800) << 10) + (ch2 - 0xdc00) + 0x10000;
          if (s1[i++] != 0xf0 + (c >> 18)) return -1;
@@ -4932,56 +5549,89 @@ static int stt_CompareUTF8toUTF16_bigendian_internal(char *s1, int len1, char *s
 // will be BIG-ENDIAN... use stt_CompareUTF8toUTF16_bigendian() to compare
 STT_DEF const char *stt_GetFontNameString(const stt_fontinfo *font, int *length, int platformID, int encodingID, int languageID, int nameID)
 {
-   stt_int32 i,count,stringOffset;
-   stt_uint8 *fc = font->data;
-   stt_uint32 offset = font->fontstart;
-   stt_uint32 nm = stt__find_table_raw(fc, offset, "name");
-   if (!nm) return NULL;
+   stt_int32 i,count;
+   stt_uint32 nm, nm_size, stringOffset;
+   if (!font || !length) return NULL;
+   *length = 0;
+   nm = stt__find_table(font, font->fontstart, "name");
+   nm_size = stt__get_table_size(font, font->fontstart, "name");
+   if (!nm || nm_size < 6) return NULL;
 
-   count = ttUSHORT(fc+nm+2);
-   stringOffset = nm + ttUSHORT(fc+nm+4);
+   count = stt__safe_read16(font, nm+2);
+   if ((stt_uint32)count > (nm_size-6)/12) return NULL;
+   stringOffset = stt__safe_read16(font, nm+4);
+   if (stringOffset > nm_size) return NULL;
    for (i=0; i < count; ++i) {
       stt_uint32 loc = nm + 6 + 12 * i;
-      if (platformID == ttUSHORT(fc+loc+0) && encodingID == ttUSHORT(fc+loc+2)
-          && languageID == ttUSHORT(fc+loc+4) && nameID == ttUSHORT(fc+loc+6)) {
-         *length = ttUSHORT(fc+loc+8);
-         return (const char *) (fc+stringOffset+ttUSHORT(fc+loc+10));
+      if (platformID == stt__safe_read16(font, loc) &&
+          encodingID == stt__safe_read16(font, loc+2) &&
+          languageID == stt__safe_read16(font, loc+4) &&
+          nameID == stt__safe_read16(font, loc+6)) {
+         stt_uint32 slen = stt__safe_read16(font, loc+8);
+         stt_uint32 soff = stt__safe_read16(font, loc+10);
+         if (soff > nm_size-stringOffset || slen > nm_size-stringOffset-soff)
+            return NULL;
+         *length = (int)slen;
+         return (const char *)(font->data + nm + stringOffset + soff);
       }
    }
    return NULL;
 }
 
-static int stt__matchpair(stt_uint8 *fc, stt_uint32 nm, stt_uint8 *name, stt_int32 nlen, stt_int32 target_id, stt_int32 next_id)
+static int stt__matchpair(const stt_fontinfo *info, stt_uint32 nm,
+                          stt_uint32 nm_size, stt_uint8 *name,
+                          stt_int32 nlen, stt_int32 target_id,
+                          stt_int32 next_id)
 {
    stt_int32 i;
-   stt_int32 count = ttUSHORT(fc+nm+2);
-   stt_int32 stringOffset = nm + ttUSHORT(fc+nm+4);
+   stt_int32 count;
+   stt_uint32 stringOffset;
+
+   if (!info || !name || nlen < 0 || nm_size < 6) return 0;
+   count = stt__safe_read16(info, nm+2);
+   if ((stt_uint32)count > (nm_size-6)/12) return 0;
+   stringOffset = stt__safe_read16(info, nm+4);
+   if (stringOffset > nm_size) return 0;
 
    for (i=0; i < count; ++i) {
       stt_uint32 loc = nm + 6 + 12 * i;
-      stt_int32 id = ttUSHORT(fc+loc+6);
+      stt_int32 id = stt__safe_read16(info, loc+6);
       if (id == target_id) {
          // find the encoding
-         stt_int32 platform = ttUSHORT(fc+loc+0), encoding = ttUSHORT(fc+loc+2), language = ttUSHORT(fc+loc+4);
+         stt_int32 platform = stt__safe_read16(info, loc);
+         stt_int32 encoding = stt__safe_read16(info, loc+2);
+         stt_int32 language = stt__safe_read16(info, loc+4);
 
          // is this a Unicode encoding?
          if (platform == 0 || (platform == 3 && encoding == 1) || (platform == 3 && encoding == 10)) {
-            stt_int32 slen = ttUSHORT(fc+loc+8);
-            stt_int32 off = ttUSHORT(fc+loc+10);
+            stt_uint32 slen = stt__safe_read16(info, loc+8);
+            stt_uint32 off = stt__safe_read16(info, loc+10);
+
+            if (off > nm_size-stringOffset || slen > nm_size-stringOffset-off)
+               continue;
 
             // check if there's a prefix match
-            stt_int32 matchlen = stt__CompareUTF8toUTF16_bigendian_prefix(name, nlen, fc+stringOffset+off,slen);
+            stt_int32 matchlen = stt__CompareUTF8toUTF16_bigendian_prefix(
+               name, nlen, info->data+nm+stringOffset+off, (stt_int32)slen);
             if (matchlen >= 0) {
                // check for target_id+1 immediately following, with same encoding & language
-               if (i+1 < count && ttUSHORT(fc+loc+12+6) == next_id && ttUSHORT(fc+loc+12) == platform && ttUSHORT(fc+loc+12+2) == encoding && ttUSHORT(fc+loc+12+4) == language) {
-                  slen = ttUSHORT(fc+loc+12+8);
-                  off = ttUSHORT(fc+loc+12+10);
+               if (i+1 < count && stt__safe_read16(info, loc+18) == next_id &&
+                   stt__safe_read16(info, loc+12) == platform &&
+                   stt__safe_read16(info, loc+14) == encoding &&
+                   stt__safe_read16(info, loc+16) == language) {
+                  slen = stt__safe_read16(info, loc+20);
+                  off = stt__safe_read16(info, loc+22);
+                  if (off > nm_size-stringOffset || slen > nm_size-stringOffset-off)
+                     continue;
                   if (slen == 0) {
                      if (matchlen == nlen)
                         return 1;
                   } else if (matchlen < nlen && name[matchlen] == ' ') {
                      ++matchlen;
-                     if (stt_CompareUTF8toUTF16_bigendian_internal((char*) (name+matchlen), nlen-matchlen, (char*)(fc+stringOffset+off),slen))
+                     if (stt_CompareUTF8toUTF16_bigendian_internal(
+                            (char *)(name+matchlen), nlen-matchlen,
+                            (char *)(info->data+nm+stringOffset+off),
+                            (stt_int32)slen))
                         return 1;
                   }
                } else {
@@ -4998,44 +5648,56 @@ static int stt__matchpair(stt_uint8 *fc, stt_uint32 nm, stt_uint8 *name, stt_int
    return 0;
 }
 
-static int stt__matches(stt_uint8 *fc, stt_uint32 offset, stt_uint8 *name, stt_int32 flags)
+static int stt__matches(stt_uint8 *fc, int data_size, stt_uint32 offset,
+                        stt_uint8 *name, stt_int32 flags)
 {
    stt_int32 nlen = (stt_int32) STT_strlen((char *) name);
-   stt_uint32 nm,hd;
-   if (!stt__isfont(fc+offset)) return 0;
+   stt_uint32 nm,nm_size,hd;
+   stt_fontinfo info;
+   STT_memset(&info, 0, sizeof(info));
+   if (offset > (stt_uint32)data_size ||
+       !stt_InitFont_internal(&info, fc, data_size, (int)offset)) return 0;
 
    // check italics/bold/underline flags in macStyle...
    if (flags) {
-      hd = stt__find_table_raw(fc, offset, "head");
-      if ((ttUSHORT(fc+hd+44) & 7) != (flags & 7)) return 0;
+      hd = stt__find_table(&info, offset, "head");
+      if (!hd || (stt__safe_read16(&info, hd+44) & 7) != (flags & 7)) return 0;
    }
 
-   nm = stt__find_table_raw(fc, offset, "name");
+   nm = stt__find_table(&info, offset, "name");
+   nm_size = stt__get_table_size(&info, offset, "name");
    if (!nm) return 0;
 
    if (flags) {
       // if we checked the macStyle flags, then just check the family and ignore the subfamily
-      if (stt__matchpair(fc, nm, name, nlen, 16, -1))  return 1;
-      if (stt__matchpair(fc, nm, name, nlen,  1, -1))  return 1;
-      if (stt__matchpair(fc, nm, name, nlen,  3, -1))  return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen, 16, -1)) return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen,  1, -1)) return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen,  3, -1)) return 1;
    } else {
-      if (stt__matchpair(fc, nm, name, nlen, 16, 17))  return 1;
-      if (stt__matchpair(fc, nm, name, nlen,  1,  2))  return 1;
-      if (stt__matchpair(fc, nm, name, nlen,  3, -1))  return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen, 16, 17)) return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen,  1,  2)) return 1;
+      if (stt__matchpair(&info, nm, nm_size, name, nlen,  3, -1)) return 1;
    }
 
    return 0;
 }
 
-static int stt_FindMatchingFont_internal(unsigned char *font_collection, char *name_utf8, stt_int32 flags)
+static int stt_FindMatchingFont_internal(unsigned char *font_collection,
+                                         int fontdata_size, char *name_utf8,
+                                         stt_int32 flags)
 {
-   stt_int32 i;
-   for (i=0;;++i) {
-      stt_int32 off = stt_GetFontOffsetForIndex(font_collection, i);
-      if (off < 0) return off;
-      if (stt__matches((stt_uint8 *) font_collection, off, (stt_uint8*) name_utf8, flags))
+   stt_int32 i, count;
+   if (!font_collection || !name_utf8 || fontdata_size < 0) return -1;
+   count = stt_GetNumberOfFonts_internal(font_collection, fontdata_size);
+   for (i=0; i<count; ++i) {
+      stt_int32 off = stt_GetFontOffsetForIndex_internal(font_collection,
+                                                          fontdata_size, i);
+      if (off < 0) return -1;
+      if (stt__matches((stt_uint8 *)font_collection, fontdata_size,
+                       (stt_uint32)off, (stt_uint8 *)name_utf8, flags))
          return off;
    }
+   return -1;
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -5050,14 +5712,14 @@ STT_DEF int stt_BakeFontBitmap(const unsigned char *data, int data_size, int off
    return stt_BakeFontBitmap_internal((unsigned char *) data, data_size, offset, pixel_height, pixels, pw, ph, first_char, num_chars, chardata);
 }
 
-STT_DEF int stt_GetFontOffsetForIndex(const unsigned char *data, int index)
+STT_DEF int stt_GetFontOffsetForIndex(const unsigned char *data, int data_size, int index)
 {
-   return stt_GetFontOffsetForIndex_internal((unsigned char *) data, index);
+   return stt_GetFontOffsetForIndex_internal((unsigned char *) data, data_size, index);
 }
 
-STT_DEF int stt_GetNumberOfFonts(const unsigned char *data)
+STT_DEF int stt_GetNumberOfFonts(const unsigned char *data, int data_size)
 {
-   return stt_GetNumberOfFonts_internal((unsigned char *) data);
+   return stt_GetNumberOfFonts_internal((unsigned char *) data, data_size);
 }
 
 STT_DEF int stt_InitFont(stt_fontinfo *info, const unsigned char *data, int data_size, int offset)
@@ -5065,9 +5727,9 @@ STT_DEF int stt_InitFont(stt_fontinfo *info, const unsigned char *data, int data
    return stt_InitFont_internal(info, (unsigned char *) data, data_size, offset);
 }
 
-STT_DEF int stt_FindMatchingFont(const unsigned char *fontdata, const char *name, int flags)
+STT_DEF int stt_FindMatchingFont(const unsigned char *fontdata, int fontdata_size, const char *name, int flags)
 {
-   return stt_FindMatchingFont_internal((unsigned char *) fontdata, (char *) name, flags);
+   return stt_FindMatchingFont_internal((unsigned char *) fontdata, fontdata_size, (char *) name, flags);
 }
 
 STT_DEF int stt_CompareUTF8toUTF16_bigendian(const char *s1, int len1, const char *s2, int len2)
